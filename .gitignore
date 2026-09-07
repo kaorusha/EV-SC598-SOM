@@ -1,0 +1,67 @@
+﻿# ==============================================================================
+# CrossCore Embedded Studio (CCES) / Eclipse CDT Build Outputs
+# ==============================================================================
+[Dd]ebug/
+[Rr]elease/
+[Bb]uild/
+bin/
+obj/
+
+# CCES compiled executables, loader files and object files
+*.dxe
+*.ldr
+*.doj
+*.o
+*.obj
+*.d
+*.map
+*.ipa
+*.isb
+*.pgo
+*.xml.bak
+linker_log.xml
+
+# Generated Makefiles and dependency files inside build folders
+makefile
+objects.mk
+sources.mk
+subdir.mk
+includes-*.txt
+input-file.txt
+
+# Eclipse / CCES workspace & temp files
+.metadata/
+.loadpath
+.recommenders/
+*.bak
+*.tmp
+*~
+
+# ==============================================================================
+# VS Code
+# ==============================================================================
+.vscode/*
+!.vscode/c_cpp_properties.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.vscode/*.log
+.vscode/ipch/
+.vscode/.history/
+
+# ==============================================================================
+# Windows OS temporary files
+# ==============================================================================
+[Tt]humbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ==============================================================================
+# macOS temporary files
+# ==============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
