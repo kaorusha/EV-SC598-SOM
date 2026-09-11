@@ -1,0 +1,95 @@
+{
+    "configurations": [
+        {
+            "name": "SC598_SHARC",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "D:/analog/cces/**",
+                "D:/AnalogDevices/**",
+                "${workspaceFolder}",
+                "${workspaceFolder}/EV-SOMCRR-EZKIT/SC598/sharc/AD_Talkthrough_I2S_SC598_SHARC_Core1/system",
+                "D:/analog/cces/SHARC/include",
+                "D:/analog/cces/SHARC/include/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "__ADSPSC598__",
+                "__ADSPSC59x__",
+                "__ADSP2159x__",
+                "__ADSP21569_FAMILY__",
+                "__ADSP2156x__",
+                "__ADSPARM__",
+                "CORE1=1",
+                "ADI_DEBUG=1",
+                "ADI_MCAPI=1",
+                "_LANGUAGE_C=1",
+                "__ECC__=1",
+                "__ANALOG_EXTENSIONS__=1",
+                "__ADSPSC598__=1",
+                "__ADSPSC598_FAMILY__=1",
+                "__ADSPSC59x__=1",
+                "__ADSPSC5xx__=1",
+                "__ADSP2159x__=1",
+                "__ADSP215xx__=1",
+                "__ADSPSHARC__=0x230",
+                "__ADSP21000__=1",
+                "__SIMDSHARC__=1",
+                "__BA_SHARC__=1",
+                "__BYTE_ADDRESSING__=1",
+                "__SHORT_WORD_CODE__=1",
+                "__NUM_ARM_CORES__=1",
+                "__NUM_SHARC_CORES__=2",
+                "__NUM_CORES__=3",
+                "__HETEROGENEOUS_PROCESSOR__=1",
+                "__pm=",
+                "__dm=",
+                "pm=",
+                "dm=",
+                "section(x)=__attribute__((section(x)))"
+            ],
+            "compilerPath": "D:/analog/cces/ARM/aarch64-none-elf/bin/aarch64-none-elf-gcc.exe",
+            "compilerArgs": [
+                "-U__ADSPARM__",
+                "-U__ADSPCORTEXA55__"
+            ],
+            "cStandard": "c11",
+            "intelliSenseMode": "windows-gcc-arm64"
+        },
+        {
+            "name": "SC598_ARM",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/EV-SOMCRR-EZKIT/SC598/arm/AD_Talkthrough_I2S_SC598_Cortex_Core0/system",
+                "D:/analog/cces/ARM/aarch64-none-elf/aarch64-none-elf/include",
+                "D:/analog/cces/ARM/aarch64-none-elf/aarch64-none-elf/include/adi",
+                "D:/analog/cces/ARM/aarch64-none-elf/aarch64-none-elf/include/adi/cortex-a55",
+                "D:/analog/cces/ARM/aarch64-none-elf/aarch64-none-elf/include/adi/cortex-a55/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "CORE0=1",
+                "ADI_DEBUG=1",
+                "__ADSPSC598__=1",
+                "__ADSPSC598_FAMILY__=1",
+                "__ADSPSC59x__=1",
+                "__ADSPSC5xx__=1",
+                "__ADSP215xx__=1",
+                "__ADSP2159x__=1",
+                "__ADSPARM__=1",
+                "__ADSPCORTEXA55__=1",
+                "__NUM_ARM_CORES__=1",
+                "__NUM_SHARC_CORES__=2",
+                "__NUM_CORES__=3"
+            ],
+            "compilerPath": "D:/analog/cces/ARM/aarch64-none-elf/bin/aarch64-none-elf-gcc.exe",
+            "compilerArgs": [
+                "-mproc=ADSP-SC598"
+            ],
+            "cStandard": "c11",
+            "intelliSenseMode": "windows-gcc-arm64"
+        }
+    ],
+    "version": 4
+}
