@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?fileVersion 4.0.0?><cproject storage_type_id="org.eclipse.cdt.core.XmlProjectDescriptionStorage">
+	<storageModule moduleId="org.eclipse.cdt.core.settings">
+		<cconfiguration id="arm.toolchain.bare.target.exe.debug.1875451278">
+			<storageModule buildSystemId="org.eclipse.cdt.managedbuilder.core.configurationDataProvider" id="arm.toolchain.bare.target.exe.debug.1875451278" moduleId="org.eclipse.cdt.core.settings" name="Debug">
+				<macros>
+					<stringMacro name="sport-driver-version" type="VALUE_TEXT" value="1.0"/>
+					<stringMacro name="twi-driver-version" type="VALUE_TEXT" value="2.0"/>
+					<stringMacro name="spu-service-version" type="VALUE_TEXT" value="1.0"/>
+					<stringMacro name="pdma-service-version" type="VALUE_TEXT" value="1.0"/>
+				</macros>
+				<externalSettings/>
+				<extensions>
+					<extension id="org.eclipse.cdt.core.ELF" point="org.eclipse.cdt.core.BinaryParser"/>
+					<extension id="org.eclipse.cdt.core.GASErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GmakeErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GLDErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="com.analog.crosscore.core.CCESARMErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.CWDLocator" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GCCErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+				</extensions>
+			</storageModule>
+			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+				<configuration artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="clean" description="" errorParsers="com.analog.crosscore.core.CCESARMErrorParser" id="arm.toolchain.bare.target.exe.debug.1875451278" name="Debug" parent="arm.toolchain.bare.target.exe.debug">
+					<folderInfo id="arm.toolchain.bare.target.exe.debug.1875451278." name="/" resourcePath="">
+						<toolChain id="arm.bare.toolchain.exe.debug.2028752926" name="CrossCore ARM Bare-Metal Toolchain" superClass="arm.bare.toolchain" targetTool="arm.toolchain.bare.c.linker">
+							<targetPlatform archList="all" binaryParser="org.eclipse.cdt.core.ELF" id="arm.toolchain.platform.base.646782577" name="Development Platform" osList="all" superClass="arm.toolchain.platform.base"/>
+							<builder buildPath="${workspace_loc:/AD_Talkthrough_I2S_SC594_Cortex_Core0}/Debug" id="arm.toolchain.builder.base.1682018508" keepEnvironmentInBuildfile="false" name="Gnu Make Builder" superClass="arm.toolchain.builder.base"/>
+							<tool id="arm.toolchain.bare.assembler.285680918" name="CrossCore ARM Bare Metal Assembler" superClass="arm.toolchain.bare.assembler">
+								<option id="arm.assembler.option.debuginfo.1859072862" name="Generate debug information (-g)" superClass="arm.assembler.option.debuginfo" useByScannerDiscovery="false"/>
+								<option id="arm.base.assembler.option.proc.559889449" name="-mproc" superClass="arm.base.assembler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.assembler.option.sirevision.888026842" name="-msi-revision" superClass="arm.assembler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.assembler.option.preprocessdefs.210329017" name="Preprocessor definitions (-D):" superClass="arm.assembler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="_DEBUG"/>
+								</option>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.assembler.option.additionaldirectories.1624965017" name="Additional include directories (-I):" superClass="arm.assembler.option.additionaldirectories" valueType="includePath">
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/system}&quot;"/>
+								</option>
+								<inputType id="arm.toolchain.assembler.base.input.980962000" superClass="arm.toolchain.assembler.base.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.compiler.413338000" name="CrossCore ARM Bare Metal C Compiler" superClass="arm.toolchain.bare.c.compiler">
+								<option defaultValue="false" id="arm.base.compiler.option.optimization.enable.1519598349" name="Enable optimization" superClass="arm.base.compiler.option.optimization.enable" valueType="boolean"/>
+								<option defaultValue="arm.base.compiler.option.optimization.og" id="arm.base.compiler.option.optimization.1148812256" name="Optimization level" superClass="arm.base.compiler.option.optimization" valueType="enumerated"/>
+								<option defaultValue="true" id="arm.base.compiler.option.debug.1943785561" name="Generate debug information (-g)" superClass="arm.base.compiler.option.debug" valueType="boolean"/>
+								<option id="arm.base.compiler.option.proc.728788460" name="-mproc" superClass="arm.base.compiler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.base.compiler.option.sirevision.145047802" name="-msi-revision" superClass="arm.base.compiler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.preprocessdefs.1050219989" name="Preprocessor definitions (-D):" superClass="arm.base.compiler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="_DEBUG"/>
+									<listOptionValue builtIn="false" value="ADI_DEBUG"/>
+								</option>
+								<option id="arm.toolchain.cpp.compiler.option.coreid.35040999" name="Specify the core Id (-DCORE[A|B|0-2])" superClass="arm.toolchain.cpp.compiler.option.coreid" value="0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.include.paths.645263351" name="Additional include directories (-I):" superClass="arm.base.compiler.option.include.paths" valueType="includePath">
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/system}&quot;"/>
+								</option>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.additionaloptions.1909748538" superClass="arm.base.compiler.option.additionaloptions" valueType="stringList">
+									<listOptionValue builtIn="false" value="-Wno-missing-braces"/>
+								</option>
+								<inputType id="arm.toolchain.bare.c.input.1752034923" name="C Source" superClass="arm.toolchain.bare.c.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.linker.1914920277" name="CrossCore ARM Bare Metal C Linker" superClass="arm.toolchain.bare.c.linker">
+								<option defaultValue="true" id="arm.c.linker.debuglibs.353288395" name="Use debug system libraries (-mdebug-libs)" superClass="arm.c.linker.debuglibs" valueType="boolean"/>
+								<option id="arm.linker.option.proc.2044021627" name="-mproc" superClass="arm.linker.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.linker.option.sirevision.1061909472" name="-msi-revision" superClass="arm.linker.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.linker.option.preprocessdefs.717819544" name="Preprocessor definitions (-D):" superClass="arm.linker.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="DEBUG"/>
+								</option>
+								<option id="arm.linker.option.ldprocessing.ldfile.476900599" name="Custom linker script (-T)" superClass="arm.linker.option.ldprocessing.ldfile" value="&quot;${ProjDirPath}/system/linker/app.ld&quot;" valueType="string"/>
+								<inputType id="arm.linker.input.325547816" superClass="arm.linker.input">
+									<additionalInput kind="additionaldependency" paths="$(USER_OBJS)"/>
+								</inputType>
+							</tool>
+							<tool id="arm.toolchain.bare.cpp.compiler.758180548" name="CrossCore ARM Bare Metal C++ Compiler" superClass="arm.toolchain.bare.cpp.compiler">
+								<option defaultValue="false" id="arm.base.compiler.option.optimization.enable.1127998278" name="Enable optimization" superClass="arm.base.compiler.option.optimization.enable" valueType="boolean"/>
+								<option defaultValue="arm.base.compiler.option.optimization.og" id="arm.base.compiler.option.optimization.1373811672" name="Optimization level" superClass="arm.base.compiler.option.optimization" valueType="enumerated"/>
+								<option defaultValue="true" id="arm.base.compiler.option.debug.807417954" name="Generate debug information (-g)" superClass="arm.base.compiler.option.debug" valueType="boolean"/>
+								<option id="arm.base.compiler.option.proc.995639178" name="-mproc" superClass="arm.base.compiler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.base.compiler.option.sirevision.2072334736" name="-msi-revision" superClass="arm.base.compiler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.preprocessdefs.965280947" name="Preprocessor definitions (-D):" superClass="arm.base.compiler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+								</option>
+								<option id="arm.toolchain.cpp.compiler.option.coreid.1900091484" name="Specify the core Id (-DCORE[A|B|0-2])" superClass="arm.toolchain.cpp.compiler.option.coreid" value="0" valueType="string"/>
+							</tool>
+							<tool id="arm.toolchain.bare.cpp.linker.583508606" name="CrossCore ARM Bare Metal C++ Linker" superClass="arm.toolchain.bare.cpp.linker">
+								<option defaultValue="true" id="arm.cpp.linker.debuglibs.44324619" name="Use debug system libraries (-mdebug-libs)" superClass="arm.cpp.linker.debuglibs" valueType="boolean"/>
+								<option id="arm.linker.option.proc.1597101971" name="-mproc" superClass="arm.linker.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.linker.option.sirevision.1993957088" name="-msi-revision" superClass="arm.linker.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.linker.option.preprocessdefs.1318014493" name="Preprocessor definitions (-D):" superClass="arm.linker.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+								</option>
+							</tool>
+							<tool id="arm.toolchain.bare.archiver.670255932" name="CrossCore ARM Bare Metal Archiver" superClass="arm.toolchain.bare.archiver"/>
+							<tool id="arm.toolchain.loader.1863925825" name="CrossCore ARM Loader" superClass="arm.toolchain.loader">
+								<option id="arm.loader.option.proc.1290207258" name="-proc" superClass="arm.loader.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.loader.option.sirevision.1264304653" name="-si-revision" superClass="arm.loader.option.sirevision" value=" 0.0" valueType="string"/>
+							</tool>
+							<tool id="arm.toolchain.bare.preprocessor.570154942" name="CrossCore ARM Bare Metal Preprocessor" superClass="arm.toolchain.bare.preprocessor"/>
+							<tool id="arm.deviceprogrammer.148375579" name="CrossCore ARM Device Programmer" superClass="arm.deviceprogrammer">
+								<option id="deviceprogrammer.option.proc.1275798463" name="-proc" superClass="deviceprogrammer.option.proc" value=" ADSP-SC594" valueType="string"/>
+							</tool>
+						</toolChain>
+					</folderInfo>
+					<folderInfo id="arm.toolchain.bare.target.exe.debug.1875451278.system" name="system" resourcePath="system">
+						<toolChain id="arm.bare.toolchain.1135707598" name="CrossCore ARM Bare-Metal Toolchain" superClass="arm.bare.toolchain" unusedChildren="">
+							<tool id="arm.toolchain.bare.assembler.876074002" name="CrossCore ARM Bare Metal Assembler" superClass="arm.toolchain.bare.assembler.285680918">
+								<inputType id="arm.toolchain.assembler.base.input.999585738" superClass="arm.toolchain.assembler.base.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.compiler.912699311" name="CrossCore ARM Bare Metal C Compiler" superClass="arm.toolchain.bare.c.compiler.413338000">
+								<inputType id="arm.toolchain.bare.c.input.1580553810" name="C Source" superClass="arm.toolchain.bare.c.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.linker.806328594" name="CrossCore ARM Bare Metal C Linker" superClass="arm.toolchain.bare.c.linker.1914920277"/>
+							<tool id="arm.toolchain.bare.cpp.compiler.2077468775" name="CrossCore ARM Bare Metal C++ Compiler" superClass="arm.toolchain.bare.cpp.compiler.758180548"/>
+							<tool id="arm.toolchain.bare.cpp.linker.293559262" name="CrossCore ARM Bare Metal C++ Linker" superClass="arm.toolchain.bare.cpp.linker.583508606"/>
+							<tool id="arm.toolchain.bare.archiver.2050509618" name="CrossCore ARM Bare Metal Archiver" superClass="arm.toolchain.bare.archiver.670255932"/>
+							<tool id="arm.toolchain.loader.1429136561" name="CrossCore ARM Loader" superClass="arm.toolchain.loader.1863925825"/>
+							<tool id="arm.toolchain.bare.preprocessor.1470122194" name="CrossCore ARM Bare Metal Preprocessor" superClass="arm.toolchain.bare.preprocessor.570154942"/>
+							<tool id="arm.deviceprogrammer.891953527" name="CrossCore ARM Device Programmer" superClass="arm.deviceprogrammer.148375579"/>
+						</toolChain>
+					</folderInfo>
+					<sourceEntries>
+						<entry excluding="system|src" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="src"/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="system"/>
+					</sourceEntries>
+				</configuration>
+			</storageModule>
+			<storageModule moduleId="org.eclipse.cdt.core.externalSettings"/>
+		</cconfiguration>
+		<cconfiguration id="arm.toolchain.bare.target.exe.release.2076910841">
+			<storageModule buildSystemId="org.eclipse.cdt.managedbuilder.core.configurationDataProvider" id="arm.toolchain.bare.target.exe.release.2076910841" moduleId="org.eclipse.cdt.core.settings" name="Release">
+				<macros>
+					<stringMacro name="sport-driver-version" type="VALUE_TEXT" value="1.0"/>
+					<stringMacro name="twi-driver-version" type="VALUE_TEXT" value="2.0"/>
+					<stringMacro name="spu-service-version" type="VALUE_TEXT" value="1.0"/>
+					<stringMacro name="pdma-service-version" type="VALUE_TEXT" value="1.0"/>
+				</macros>
+				<externalSettings/>
+				<extensions>
+					<extension id="org.eclipse.cdt.core.ELF" point="org.eclipse.cdt.core.BinaryParser"/>
+					<extension id="org.eclipse.cdt.core.GASErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GmakeErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GLDErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="com.analog.crosscore.core.CCESARMErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.CWDLocator" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GCCErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+				</extensions>
+			</storageModule>
+			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+				<configuration artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.release" cleanCommand="clean" description="" errorParsers="com.analog.crosscore.core.CCESARMErrorParser" id="arm.toolchain.bare.target.exe.release.2076910841" name="Release" parent="arm.toolchain.bare.target.exe.release">
+					<folderInfo id="arm.toolchain.bare.target.exe.release.2076910841." name="/" resourcePath="">
+						<toolChain id="arm.bare.toolchain.exe.release.1492218956" name="CrossCore ARM Bare-Metal Toolchain" superClass="arm.bare.toolchain" targetTool="arm.toolchain.bare.c.linker">
+							<targetPlatform archList="all" binaryParser="org.eclipse.cdt.core.ELF" id="arm.toolchain.platform.base.1871767726" name="Development Platform" osList="all" superClass="arm.toolchain.platform.base"/>
+							<builder buildPath="${workspace_loc:/AD_Talkthrough_I2S_SC594_Cortex_Core0}/Release" id="arm.toolchain.builder.base.789860815" keepEnvironmentInBuildfile="false" name="Gnu Make Builder" superClass="arm.toolchain.builder.base"/>
+							<tool id="arm.toolchain.bare.assembler.1857889968" name="CrossCore ARM Bare Metal Assembler" superClass="arm.toolchain.bare.assembler">
+								<option id="arm.assembler.option.debuginfo.795163289" name="Generate debug information (-g)" superClass="arm.assembler.option.debuginfo" useByScannerDiscovery="false" value="false" valueType="boolean"/>
+								<option id="arm.base.assembler.option.proc.689200754" name="-mproc" superClass="arm.base.assembler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.assembler.option.sirevision.67642865" name="-msi-revision" superClass="arm.assembler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.assembler.option.preprocessdefs.843614473" name="Preprocessor definitions (-D):" superClass="arm.assembler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="NDEBUG"/>
+								</option>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.assembler.option.additionaldirectories.400478714" name="Additional include directories (-I):" superClass="arm.assembler.option.additionaldirectories" valueType="includePath">
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/system}&quot;"/>
+								</option>
+								<inputType id="arm.toolchain.assembler.base.input.1958200334" superClass="arm.toolchain.assembler.base.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.compiler.800799701" name="CrossCore ARM Bare Metal C Compiler" superClass="arm.toolchain.bare.c.compiler">
+								<option defaultValue="true" id="arm.base.compiler.option.optimization.enable.329623735" name="Enable optimization" superClass="arm.base.compiler.option.optimization.enable" valueType="boolean"/>
+								<option defaultValue="arm.base.compiler.option.optimization.o2" id="arm.base.compiler.option.optimization.1723481224" name="Optimization level" superClass="arm.base.compiler.option.optimization" valueType="enumerated"/>
+								<option defaultValue="false" id="arm.base.compiler.option.debug.967469848" name="Generate debug information (-g)" superClass="arm.base.compiler.option.debug" valueType="boolean"/>
+								<option id="arm.base.compiler.option.proc.1664163056" name="-mproc" superClass="arm.base.compiler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.base.compiler.option.sirevision.1894917340" name="-msi-revision" superClass="arm.base.compiler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.preprocessdefs.1204106880" name="Preprocessor definitions (-D):" superClass="arm.base.compiler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="NDEBUG"/>
+								</option>
+								<option id="arm.toolchain.cpp.compiler.option.coreid.948222216" name="Specify the core Id (-DCORE[A|B|0-2])" superClass="arm.toolchain.cpp.compiler.option.coreid" value="0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.include.paths.202186693" name="Additional include directories (-I):" superClass="arm.base.compiler.option.include.paths" valueType="includePath">
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/system}&quot;"/>
+								</option>
+								<inputType id="arm.toolchain.bare.c.input.117888135" name="C Source" superClass="arm.toolchain.bare.c.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.linker.20680111" name="CrossCore ARM Bare Metal C Linker" superClass="arm.toolchain.bare.c.linker">
+								<option defaultValue="false" id="arm.c.linker.debuglibs.1521196527" name="Use debug system libraries (-mdebug-libs)" superClass="arm.c.linker.debuglibs" valueType="boolean"/>
+								<option id="arm.linker.option.proc.1649305580" name="-mproc" superClass="arm.linker.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.linker.option.sirevision.1756669176" name="-msi-revision" superClass="arm.linker.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.linker.option.preprocessdefs.1652462560" name="Preprocessor definitions (-D):" superClass="arm.linker.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+									<listOptionValue builtIn="false" value="RELEASE"/>
+								</option>
+								<option id="arm.linker.option.ldprocessing.ldfile.558624866" name="Custom linker script (-T)" superClass="arm.linker.option.ldprocessing.ldfile" value="&quot;${ProjDirPath}/system/linker/app.ld&quot;" valueType="string"/>
+								<inputType id="arm.linker.input.90822603" superClass="arm.linker.input">
+									<additionalInput kind="additionaldependency" paths="$(USER_OBJS)"/>
+								</inputType>
+							</tool>
+							<tool id="arm.toolchain.bare.cpp.compiler.1966271226" name="CrossCore ARM Bare Metal C++ Compiler" superClass="arm.toolchain.bare.cpp.compiler">
+								<option defaultValue="true" id="arm.base.compiler.option.optimization.enable.359147442" name="Enable optimization" superClass="arm.base.compiler.option.optimization.enable" valueType="boolean"/>
+								<option defaultValue="arm.base.compiler.option.optimization.o2" id="arm.base.compiler.option.optimization.712825127" name="Optimization level" superClass="arm.base.compiler.option.optimization" valueType="enumerated"/>
+								<option defaultValue="false" id="arm.base.compiler.option.debug.593138621" name="Generate debug information (-g)" superClass="arm.base.compiler.option.debug" valueType="boolean"/>
+								<option id="arm.base.compiler.option.proc.1181436682" name="-mproc" superClass="arm.base.compiler.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.base.compiler.option.sirevision.1193876929" name="-msi-revision" superClass="arm.base.compiler.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.base.compiler.option.preprocessdefs.749601066" name="Preprocessor definitions (-D):" superClass="arm.base.compiler.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+								</option>
+								<option id="arm.toolchain.cpp.compiler.option.coreid.418388749" name="Specify the core Id (-DCORE[A|B|0-2])" superClass="arm.toolchain.cpp.compiler.option.coreid" value="0" valueType="string"/>
+							</tool>
+							<tool id="arm.toolchain.bare.cpp.linker.1621653657" name="CrossCore ARM Bare Metal C++ Linker" superClass="arm.toolchain.bare.cpp.linker">
+								<option defaultValue="false" id="arm.cpp.linker.debuglibs.2064685874" name="Use debug system libraries (-mdebug-libs)" superClass="arm.cpp.linker.debuglibs" valueType="boolean"/>
+								<option id="arm.linker.option.proc.1562971689" name="-mproc" superClass="arm.linker.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.linker.option.sirevision.1639935130" name="-msi-revision" superClass="arm.linker.option.sirevision" value=" 0.0" valueType="string"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="arm.linker.option.preprocessdefs.981231904" name="Preprocessor definitions (-D):" superClass="arm.linker.option.preprocessdefs" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="CORE0"/>
+								</option>
+							</tool>
+							<tool id="arm.toolchain.bare.archiver.1245061475" name="CrossCore ARM Bare Metal Archiver" superClass="arm.toolchain.bare.archiver"/>
+							<tool id="arm.toolchain.loader.1132285350" name="CrossCore ARM Loader" superClass="arm.toolchain.loader">
+								<option id="arm.loader.option.proc.1768568076" name="-proc" superClass="arm.loader.option.proc" value=" ADSP-SC594" valueType="string"/>
+								<option id="arm.loader.option.sirevision.1021289524" name="-si-revision" superClass="arm.loader.option.sirevision" value=" 0.0" valueType="string"/>
+							</tool>
+							<tool id="arm.toolchain.bare.preprocessor.1953832991" name="CrossCore ARM Bare Metal Preprocessor" superClass="arm.toolchain.bare.preprocessor"/>
+							<tool id="arm.deviceprogrammer.988396435" name="CrossCore ARM Device Programmer" superClass="arm.deviceprogrammer">
+								<option id="deviceprogrammer.option.proc.576674265" name="-proc" superClass="deviceprogrammer.option.proc" value=" ADSP-SC594" valueType="string"/>
+							</tool>
+						</toolChain>
+					</folderInfo>
+					<folderInfo id="arm.toolchain.bare.target.exe.release.2076910841.system" name="system" resourcePath="system">
+						<toolChain id="arm.bare.toolchain.471711396" name="CrossCore ARM Bare-Metal Toolchain" superClass="arm.bare.toolchain" unusedChildren="">
+							<tool id="arm.toolchain.bare.assembler.2113048806" name="CrossCore ARM Bare Metal Assembler" superClass="arm.toolchain.bare.assembler.1857889968">
+								<inputType id="arm.toolchain.assembler.base.input.1014473339" superClass="arm.toolchain.assembler.base.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.compiler.1194400238" name="CrossCore ARM Bare Metal C Compiler" superClass="arm.toolchain.bare.c.compiler.800799701">
+								<inputType id="arm.toolchain.bare.c.input.1853465271" name="C Source" superClass="arm.toolchain.bare.c.input"/>
+							</tool>
+							<tool id="arm.toolchain.bare.c.linker.2141102884" name="CrossCore ARM Bare Metal C Linker" superClass="arm.toolchain.bare.c.linker.20680111"/>
+							<tool id="arm.toolchain.bare.cpp.compiler.2023402203" name="CrossCore ARM Bare Metal C++ Compiler" superClass="arm.toolchain.bare.cpp.compiler.1966271226"/>
+							<tool id="arm.toolchain.bare.cpp.linker.881901606" name="CrossCore ARM Bare Metal C++ Linker" superClass="arm.toolchain.bare.cpp.linker.1621653657"/>
+							<tool id="arm.toolchain.bare.archiver.8343179" name="CrossCore ARM Bare Metal Archiver" superClass="arm.toolchain.bare.archiver.1245061475"/>
+							<tool id="arm.toolchain.loader.57624737" name="CrossCore ARM Loader" superClass="arm.toolchain.loader.1132285350"/>
+							<tool id="arm.toolchain.bare.preprocessor.1979969835" name="CrossCore ARM Bare Metal Preprocessor" superClass="arm.toolchain.bare.preprocessor.1953832991"/>
+							<tool id="arm.deviceprogrammer.204371748" name="CrossCore ARM Device Programmer" superClass="arm.deviceprogrammer.988396435"/>
+						</toolChain>
+					</folderInfo>
+					<sourceEntries>
+						<entry excluding="system|src" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="src"/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="system"/>
+					</sourceEntries>
+				</configuration>
+			</storageModule>
+			<storageModule moduleId="org.eclipse.cdt.core.externalSettings"/>
+		</cconfiguration>
+	</storageModule>
+	<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+		<project id="AD_Talkthrough_I2S_SC594_Cortex_Core0.arm.toolchain.bare.target.exe.390425196" name="ARM Bare Metal Executable Project" projectType="arm.toolchain.bare.target.exe"/>
+	</storageModule>
+	<storageModule moduleId="org.eclipse.cdt.core.LanguageSettingsProviders"/>
+	<storageModule moduleId="org.eclipse.cdt.core.language.mapping">
+		<project-mappings>
+			<content-type-mapping configuration="" content-type="org.eclipse.cdt.core.asmSource" language="com.analog.crosscore.ui.asm.adi.extension"/>
+			<content-type-mapping configuration="" content-type="org.eclipse.cdt.core.cHeader" language="org.eclipse.cdt.core.c.adi.extension"/>
+			<content-type-mapping configuration="" content-type="org.eclipse.cdt.core.cSource" language="org.eclipse.cdt.core.c.adi.extension"/>
+			<content-type-mapping configuration="" content-type="org.eclipse.cdt.core.cxxHeader" language="org.eclipse.cdt.core.c++.adi.extension"/>
+			<content-type-mapping configuration="" content-type="org.eclipse.cdt.core.cxxSource" language="org.eclipse.cdt.core.c++.adi.extension"/>
+		</project-mappings>
+	</storageModule>
+	<storageModule moduleId="refreshScope"/>
+	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
+	<storageModule moduleId="scannerConfiguration">
+		<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		<scannerConfigBuildInfo instanceId="arm.toolchain.bare.target.exe.debug.1875451278;arm.toolchain.bare.target.exe.debug.1875451278.;arm.toolchain.bare.c.compiler.413338000;arm.toolchain.bare.c.input.1752034923">
+			<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		</scannerConfigBuildInfo>
+		<scannerConfigBuildInfo instanceId="arm.toolchain.bare.target.exe.release.2076910841;arm.toolchain.bare.target.exe.release.2076910841.;arm.toolchain.bare.c.compiler.800799701;arm.toolchain.bare.c.input.117888135">
+			<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		</scannerConfigBuildInfo>
+	</storageModule>
+</cproject>
