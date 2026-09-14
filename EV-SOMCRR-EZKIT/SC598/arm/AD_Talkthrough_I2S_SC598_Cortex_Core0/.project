@@ -63,6 +63,16 @@
 			<locationURI>PARENT-4-PROJECT_LOC/Audio_Talkthrough_I2S.h</locationURI>
 		</link>
 		<link>
+			<name>src/anc_fxnlms.c</name>
+			<type>1</type>
+			<locationURI>PARENT-4-PROJECT_LOC/anc_fxnlms.c</locationURI>
+		</link>
+		<link>
+			<name>src/anc_fxnlms.h</name>
+			<type>1</type>
+			<locationURI>PARENT-4-PROJECT_LOC/anc_fxnlms.h</locationURI>
+		</link>
+		<link>
 			<name>system/SoftConfig_EV_SOMCRR_EZKIT_ADAU_Reset.c</name>
 			<type>1</type>
 			<locationURI>PARENT-4-PROJECT_LOC/SoftConfig_EV_SOMCRR_EZKIT_ADAU_Reset.c</locationURI>

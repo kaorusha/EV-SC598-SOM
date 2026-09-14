@@ -23,6 +23,10 @@ to the terms of the associated Analog Devices License Agreement.
 #include "math.h"
 #include <SRU.h>
 #include "Audio_Talkthrough_I2S.h"
+#include "anc_fxnlms.h"
+
+/* ANC Enable Switch: 1 = Active ANC, 0 = Bypass (Pure Audio Talkthrough) */
+#define ANC_ENABLE 1
 
 struct Config_Table
 {
@@ -180,18 +184,26 @@ static void SPORTCallback(
         		CallbackCount +=1;
         		if(CallbackCount==1)
         		{
+#if ANC_ENABLE
+        		   ANC_Process_Block(int_SP0ABuffer4, int_SP0ABuffer1, COUNT);
+#else
         		   for(i=0;i<COUNT;i++)
         		   {
         			   int_SP0ABuffer1[i]=int_SP0ABuffer4[i];/*Copy ADC buffer to DAC buffer */
         		   }
+#endif
         		}
 
         		if(CallbackCount==2)
 				{
+#if ANC_ENABLE
+        		   ANC_Process_Block(int_SP0ABuffer5, int_SP0ABuffer2, COUNT);
+#else
 				   for(i=0;i<COUNT;i++)
 				   {
 					   int_SP0ABuffer2[i]=int_SP0ABuffer5[i];/* Copy ADC buffer to DAC buffers */
 				   }
+#endif
 				   CallbackCount=0;
 				}
 
@@ -669,6 +681,11 @@ int main(int argc, char *argv[])
 	{
 		Result=ADAU_1979_init();
 	}
+
+#if ANC_ENABLE
+	/* ANC Algorithm Initialization */
+	ANC_Init();
+#endif
 
 	/* SPORT Initialization */
 	if (Result==0u)
