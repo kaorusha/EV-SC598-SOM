@@ -94,26 +94,25 @@ static inline void lms_update_1024(float *w, const float *hist_ptr, float grad_s
 // 區塊級即時處理函式 (直接處理 SPORT DMA TDM4 四聲道數據: 每次步進 i += 4)
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 {
-    int i, j;
+    int i;
 
-    for (i = 0, j = 0; i < count; i += 4, j += 8)
+    for (i = 0; i < count; i += 4)
     {
         // 1. 定點轉浮點 (TDM 輸入映射: Slot 0 = pRxBuf[i] 為誤差麥 d; Slot 1 = pRxBuf[i+1] 為參考麥 x)
         float d_n = (float)pRxBuf[i]   * (1.0f / 2147483648.0f); // 誤差麥克風 (Error Mic，Slot 0)
         float x_n = (float)pRxBuf[i+1] * (1.0f / 2147483648.0f); // 參考麥克風 (Reference Mic，Slot 1)
 
         // 2. 【反饋中和 (Feedback Neutralization)】
-        // 卷積估計揚聲器洩漏聲波 f_leak(n)，並從參考麥還原純淨噪聲源 u_hat(n)
         int k_y = (y_buf_idx > 0) ? (y_buf_idx - 1) : (ANC_Y_HIST_SIZE - 1);
         const float *py = &y_history[k_y + ANC_Y_HIST_SIZE];
         float f_leak  = fir_conv_2048(FEEDBACK_PATH, py);
         float u_hat_n = x_n - f_leak;
 
-        // 3. 雙鏡像更新參考訊號歷史緩衝區 (寫入兩份，保證歷史長度永遠連續，無需任何條件判斷或環狀折返)
+        // 3. 雙鏡像更新參考訊號歷史緩衝區
         x_history[anc_buf_idx] = u_hat_n;
         x_history[anc_buf_idx + ANC_X_HIST_SIZE] = u_hat_n;
 
-        // 4. 【抗噪波卷積】y(n) = W * X (使用中和後的純淨噪聲)
+        // 4. 【抗噪波卷積】y(n) = W * X
         const float *px = &x_history[anc_buf_idx + ANC_X_HIST_SIZE];
         float y_n = fir_conv_1024(w_coeffs, px);
 
@@ -134,9 +133,9 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         px_power = 0.999f * px_power + 0.001f * (x_prime_n * x_prime_n);
         float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
         float norm_mu = ANC_MU / p_eff;
-        if (norm_mu > ANC_MAX_MU) norm_mu = ANC_MAX_MU; // 嚴格限幅，徹底防止靜音時步長暴增震盪
+        if (norm_mu > ANC_MAX_MU) norm_mu = ANC_MAX_MU; 
 
-        // 9. 權重梯度更新 (帶微弱漏洩)
+        // 9. 權重梯度更新
         float grad_step = norm_mu * e_n;
         float leak = 1.0f - ANC_LEAK;
         const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE];
@@ -145,36 +144,26 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         // 10. 循環指標自增
         if (++anc_buf_idx >= ANC_X_HIST_SIZE) anc_buf_idx = 0;
 
-        // 11. 數值保護與安全限幅 (防止喇叭破音與突發大音量)
+        // 11. 數值保護與安全限幅
         if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
         if (y_n > ANC_SAFE_OUTPUT_LIMIT)  y_n = ANC_SAFE_OUTPUT_LIMIT;
         if (y_n < -ANC_SAFE_OUTPUT_LIMIT) y_n = -ANC_SAFE_OUTPUT_LIMIT;
 
-        // 12. 寫入 TDM8 雙端子全鏡像輸出緩衝區 (8 channels per audio frame):
-        //   - 喇叭端 (J17 / J19): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n) (驗證模式下直通播放 Ref Mic)
-        //   - 監聽端 (J18 / J20): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic
+        // 12. 寫入 TDM4 輸出緩衝區 (4 channels per audio frame):
+        //   - 喇叭端 (J17): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n)
+        //   - 監聽端 (J18): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic
 #if (ANC_OUTPUT_MODE == 0)
-        // [模式 0: 雙孔直通硬體驗證模式]
-        pTxBuf[j + 0] = 0;           // J17 左聲道 (Tip): 靜音 = 0 (避免左喇叭發聲)
-        pTxBuf[j + 1] = pRxBuf[i+1]; // J17 右聲道 (Ring): 右喇叭直通播放 Reference Mic 音樂
-        pTxBuf[j + 4] = 0;           // J19 左聲道 (Tip): 靜音 = 0
-        pTxBuf[j + 5] = pRxBuf[i+1]; // J19 右聲道 (Ring): 右喇叭直通播放 Reference Mic 音樂
-
-        pTxBuf[j + 2] = pRxBuf[i];   // J18 左聲道 (Tip):  100% 原始 Error Mic (給 USB 音效卡 Tip 或 NI-9234 AI0)
-        pTxBuf[j + 3] = pRxBuf[i+1]; // J18 右聲道 (Ring): 100% 原始 Reference Mic (給 NI-9234 AI1)
-        pTxBuf[j + 6] = pRxBuf[i];   // J20 左聲道 (Tip):  100% 原始 Error Mic
-        pTxBuf[j + 7] = pRxBuf[i+1]; // J20 右聲道 (Ring): 100% 原始 Reference Mic
+        // [模式 0: 直通硬體驗證模式]
+        pTxBuf[i + 0] = 0;           // J17 左聲道 (Tip): 靜音 = 0
+        pTxBuf[i + 1] = pRxBuf[i+1]; // J17 右聲道 (Ring): 播放 Reference Mic 音樂
+        pTxBuf[i + 2] = pRxBuf[i];   // J18 左聲道 (Tip): 原始 Error Mic
+        pTxBuf[i + 3] = pRxBuf[i+1]; // J18 右聲道 (Ring): 原始 Reference Mic
 #else
-        // [模式 1: 正式 ANC 降噪 + 雙孔獨立監聽模式]
-        pTxBuf[j + 0] = 0;                          // J17 左聲道 (Tip): 自動靜音 = 0 (左喇叭不發聲！)
-        pTxBuf[j + 1] = (int)(y_n * 2147483647.0f); // J17 右聲道 (Ring): 反相抗噪波 y(n) 單獨送給右喇叭！
-        pTxBuf[j + 4] = 0;                          // J19 左聲道 (Tip): 自動靜音 = 0
-        pTxBuf[j + 5] = (int)(y_n * 2147483647.0f); // J19 右聲道 (Ring): 反相抗噪波 y(n) 單獨送給右喇叭！
-
-        pTxBuf[j + 2] = pRxBuf[i];                  // J18 左聲道 (Tip):  100% 原始 Error Mic (給 USB 音效卡 Tip 或 NI-9234 AI0)
-        pTxBuf[j + 3] = pRxBuf[i+1];                // J18 右聲道 (Ring): 100% 原始 Reference Mic (給 NI-9234 AI1)
-        pTxBuf[j + 6] = pRxBuf[i];                  // J20 左聲道 (Tip):  100% 原始 Error Mic
-        pTxBuf[j + 7] = pRxBuf[i+1];                // J20 右聲道 (Ring): 100% 原始 Reference Mic
+        // [模式 1: 正式 ANC 降噪 + 獨立監聽模式]
+        pTxBuf[i + 0] = 0;                          // J17 左聲道 (Tip): 自動靜音 = 0
+        pTxBuf[i + 1] = (int)(y_n * 2147483647.0f); // J17 右聲道 (Ring): 反相抗噪波 y(n)
+        pTxBuf[i + 2] = pRxBuf[i];                  // J18 左聲道 (Tip): 原始 Error Mic
+        pTxBuf[i + 3] = pRxBuf[i+1];                // J18 右聲道 (Ring): 原始 Reference Mic
 #endif
     }
 }

@@ -80,7 +80,7 @@ struct Config_Table Config_array_DAC[28] = {
 				{     ADAU1962_DAC_PWR3,		0xaa},
 				{     ADAU1962_PDN_CTRL_2,	    0x00}, /* Power up DAC 1~8 (0x00 = all active in ADAU1962) */
 				{     ADAU1962_PDN_CTRL_3,	    0x00}, /* Power up DAC 9~12 */
-				{     ADAU1962_DAC_CTRL0,		0x18}  /* TDM8 mode (48kHz, 8ch on DSDATA1: DAC 1/2=J4/J17, DAC 3/4=J18) */
+				{     ADAU1962_DAC_CTRL0,		0x10}  /* TDM4 mode (48kHz, 4ch on DSDATA1: DAC 1/2=J4/J17, DAC 3/4=J18) */
 
 };
 
@@ -88,7 +88,7 @@ struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_BOOST			,	0x00},
 		 {ADAU1979_REG_MICBIAS			,	0x00},
 		 {ADAU1979_REG_BLOCK_POWER_SAI	,	0x30},
-		 {ADAU1979_REG_SAI_CTRL0		,	0x1B}, /* TDM8 48kHz (sync with DAC TDM8 BCLK) */
+		 {ADAU1979_REG_SAI_CTRL0		,	0x13}, /* TDM4 48kHz (sync with DAC TDM4 BCLK) */
 		 {ADAU1979_REG_SAI_CTRL1		,	0x08}, /* 32-bit slot, Slave to DAC clock */
 		 {ADAU1979_REG_CMAP12			,	0x01},
 		 {ADAU1979_REG_CMAP34			,	0x23},
@@ -214,26 +214,20 @@ static void SPORTCallback(
 #if ANC_ENABLE
         		   ANC_Process_Block(int_SP0ABuffer4, int_SP0ABuffer1, COUNT);
 #else
-        		   for(i=0, j=0; i<COUNT; i+=4, j+=8)
+        		   for(i=0; i<COUNT; i+=4)
         		   {
 #if (TALKTHROUGH_MODE == 1)
         			   /* Full Stereo Bypass Test Mode: Left = ADC0 (Err/Music L), Right = ADC1 (Ref/Music R) */
-        			   int_SP0ABuffer1[j+0] = int_SP0ABuffer4[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
-        			   int_SP0ABuffer1[j+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
-        			   int_SP0ABuffer1[j+4] = int_SP0ABuffer4[i+0] * TALKTHROUGH_GAIN; /* J19 Left  (Tip)  */
-        			   int_SP0ABuffer1[j+5] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J19 Right (Ring) */
+        			   int_SP0ABuffer1[i+0] = int_SP0ABuffer4[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
+        			   int_SP0ABuffer1[i+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
 #else
         			   /* ANC Speaker Standby Mode: Left = 0 (Mute), Right = Ref Mic (ready for ANC) */
-        			   int_SP0ABuffer1[j+0] = 0;                                       /* J17 Left  (Tip): Mute */
-        			   int_SP0ABuffer1[j+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
-        			   int_SP0ABuffer1[j+4] = 0;                                       /* J19 Left  (Tip): Mute */
-        			   int_SP0ABuffer1[j+5] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J19 Right (Ring): Ref Mic */
+        			   int_SP0ABuffer1[i+0] = 0;                                       /* J17 Left  (Tip): Mute */
+        			   int_SP0ABuffer1[i+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
 #endif
-        			   /* Monitor Out: Broadcast to BOTH J18 (DAC 3/4) and J20 (DAC 7/8) */
-        			   int_SP0ABuffer1[j+2] = int_SP0ABuffer4[i+0];                    /* J18 Left  (Tip):  Error Mic */
-        			   int_SP0ABuffer1[j+3] = int_SP0ABuffer4[i+1];                    /* J18 Right (Ring): Ref Mic */
-        			   int_SP0ABuffer1[j+6] = int_SP0ABuffer4[i+0];                    /* J20 Left  (Tip):  Error Mic */
-        			   int_SP0ABuffer1[j+7] = int_SP0ABuffer4[i+1];                    /* J20 Right (Ring): Ref Mic */
+        			   /* Monitor Out: Broadcast to J18 (DAC 3/4) */
+        			   int_SP0ABuffer1[i+2] = int_SP0ABuffer4[i+0];                    /* J18 Left  (Tip):  Error Mic */
+        			   int_SP0ABuffer1[i+3] = int_SP0ABuffer4[i+1];                    /* J18 Right (Ring): Ref Mic */
         		   }
 #endif
         		}
@@ -243,26 +237,20 @@ static void SPORTCallback(
 #if ANC_ENABLE
         		   ANC_Process_Block(int_SP0ABuffer5, int_SP0ABuffer2, COUNT);
 #else
-				   for(i=0, j=0; i<COUNT; i+=4, j+=8)
+				   for(i=0; i<COUNT; i+=4)
 				   {
 #if (TALKTHROUGH_MODE == 1)
 					   /* Full Stereo Bypass Test Mode: Left = ADC0 (Err/Music L), Right = ADC1 (Ref/Music R) */
-					   int_SP0ABuffer2[j+0] = int_SP0ABuffer5[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
-					   int_SP0ABuffer2[j+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
-					   int_SP0ABuffer2[j+4] = int_SP0ABuffer5[i+0] * TALKTHROUGH_GAIN; /* J19 Left  (Tip)  */
-					   int_SP0ABuffer2[j+5] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J19 Right (Ring) */
+					   int_SP0ABuffer2[i+0] = int_SP0ABuffer5[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
+					   int_SP0ABuffer2[i+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
 #else
 					   /* ANC Speaker Standby Mode: Left = 0 (Mute), Right = Ref Mic (ready for ANC) */
-					   int_SP0ABuffer2[j+0] = 0;                                       /* J17 Left  (Tip): Mute */
-					   int_SP0ABuffer2[j+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
-					   int_SP0ABuffer2[j+4] = 0;                                       /* J19 Left  (Tip): Mute */
-					   int_SP0ABuffer2[j+5] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J19 Right (Ring): Ref Mic */
+					   int_SP0ABuffer2[i+0] = 0;                                       /* J17 Left  (Tip): Mute */
+					   int_SP0ABuffer2[i+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
 #endif
-					   /* Monitor Out: Broadcast to BOTH J18 (DAC 3/4) and J20 (DAC 7/8) */
-					   int_SP0ABuffer2[j+2] = int_SP0ABuffer5[i+0];                    /* J18 Left  (Tip):  Error Mic */
-					   int_SP0ABuffer2[j+3] = int_SP0ABuffer5[i+1];                    /* J18 Right (Ring): Ref Mic */
-					   int_SP0ABuffer2[j+6] = int_SP0ABuffer5[i+0];                    /* J20 Left  (Tip):  Error Mic */
-					   int_SP0ABuffer2[j+7] = int_SP0ABuffer5[i+1];                    /* J20 Right (Ring): Ref Mic */
+					   /* Monitor Out: Broadcast to J18 (DAC 3/4) */
+					   int_SP0ABuffer2[i+2] = int_SP0ABuffer5[i+0];                    /* J18 Left  (Tip):  Error Mic */
+					   int_SP0ABuffer2[i+3] = int_SP0ABuffer5[i+1];                    /* J18 Right (Ring): Ref Mic */
 				   }
 #endif
 				   CallbackCount=0;
@@ -389,7 +377,7 @@ static void PrepareDescriptors (void)
 	iDESC_LIST_1_SP4A.pNxtDscp		= &iDESC_LIST_2_SP4A;
 #endif
 	iDESC_LIST_1_SP4A.Config		= ENUM_DMA_CFG_XCNT_INT ;
-	iDESC_LIST_1_SP4A.XCount		= COUNT*2;
+	iDESC_LIST_1_SP4A.XCount		= COUNT;
 	iDESC_LIST_1_SP4A.XModify		= 4;
 	iDESC_LIST_1_SP4A.YCount		= 0;
 	iDESC_LIST_1_SP4A.YModify		= 0;
@@ -402,7 +390,7 @@ static void PrepareDescriptors (void)
 	iDESC_LIST_2_SP4A.pNxtDscp		= &iDESC_LIST_1_SP4A;
 #endif
 	iDESC_LIST_2_SP4A.Config		= ENUM_DMA_CFG_XCNT_INT ;
-	iDESC_LIST_2_SP4A.XCount		= COUNT*2;
+	iDESC_LIST_2_SP4A.XCount		= COUNT;
 	iDESC_LIST_2_SP4A.XModify		= 4;
 	iDESC_LIST_2_SP4A.YCount		= 0;
 	iDESC_LIST_2_SP4A.YModify		= 0;
@@ -457,26 +445,26 @@ static int Sport_Init(void)
 	eResult = adi_sport_Open(SPORT_DEVICE_4B,ADI_HALF_SPORT_B,ADI_SPORT_DIR_RX, ADI_SPORT_MC_MODE, SPORTMemory4B,ADI_SPORT_MEMORY_SIZE,&hSPORTDev4BRx);
 	CHECK_SPORT_STEP("adi_sport_Open(4B RX)", eResult);
 
-	/* Configure the data, clock, frame sync and MCTL of SPORT Device 4A (TX: 8 channels, Slot 0~7 -> DAC 1~8) */
+	/* Configure the data, clock, frame sync and MCTL of SPORT Device 4A (TX: 4 channels, Slot 0~3 -> DAC 1~4) */
 	eResult = adi_sport_ConfigData(hSPORTDev4ATx,ADI_SPORT_DTYPE_SIGN_FILL,31,false,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigData(4A)", eResult);
 	eResult = adi_sport_ConfigClock(hSPORTDev4ATx,32,false,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigClock(4A)", eResult);
 	eResult = adi_sport_ConfigFrameSync(hSPORTDev4ATx,31,false,false,false,true,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigFrameSync(4A)", eResult);
-	eResult = adi_sport_ConfigMC(hSPORTDev4ATx,1u,7u,0u,true);
+	eResult = adi_sport_ConfigMC(hSPORTDev4ATx,1u,3u,0u,true);
 	CHECK_SPORT_STEP("adi_sport_ConfigMC(4A)", eResult);
-	eResult = adi_sport_SelectChannel(hSPORTDev4ATx,0u,7u);
+	eResult = adi_sport_SelectChannel(hSPORTDev4ATx,0u,3u);
 	CHECK_SPORT_STEP("adi_sport_SelectChannel(4A)", eResult);
 
-	/* Configure the data, clock, frame sync and MCTL of SPORT Device 4B (RX: 8 channels on wire, capture 4 channels Slot 0~3) */
+	/* Configure the data, clock, frame sync and MCTL of SPORT Device 4B (RX: 4 channels on wire, capture 4 channels Slot 0~3) */
 	eResult = adi_sport_ConfigData(hSPORTDev4BRx,ADI_SPORT_DTYPE_SIGN_FILL,31,false,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigData(4B)", eResult);
 	eResult = adi_sport_ConfigClock(hSPORTDev4BRx,32,false,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigClock(4B)", eResult);
 	eResult = adi_sport_ConfigFrameSync(hSPORTDev4BRx,31,false,false,false,true,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigFrameSync(4B)", eResult);
-	eResult = adi_sport_ConfigMC(hSPORTDev4BRx,1u,7u,0u,true);
+	eResult = adi_sport_ConfigMC(hSPORTDev4BRx,1u,3u,0u,true);
 	CHECK_SPORT_STEP("adi_sport_ConfigMC(4B)", eResult);
 	eResult = adi_sport_SelectChannel(hSPORTDev4BRx,0u,3u);
 	CHECK_SPORT_STEP("adi_sport_SelectChannel(4B)", eResult);
@@ -829,7 +817,7 @@ int main(int argc, char *argv[])
 	/* SPORT Initialization */
 	if (Result==0u)
 	{
-		printf("[Step 8] Configuring SPORT 4A/4B (TDM8 mode)...\n");
+		printf("[Step 8] Configuring SPORT 4A/4B (TDM4 mode)...\n");
 		fflush(stdout);
 		Result=Sport_Init();
 	}
@@ -848,12 +836,12 @@ int main(int argc, char *argv[])
 		printf(">>> SYSTEM READY: Running audio streaming talkthrough <<<\n");
 #if (TALKTHROUGH_MODE == 1)
 		printf(">>> MODE: Full Stereo Bypass Test (Gain = %dx)\n", TALKTHROUGH_GAIN);
-		printf(">>> Output Jacks J17 & J19: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
-		printf(">>> Output Jacks J18 & J20: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
+		printf(">>> Output Jack J17: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
+		printf(">>> Output Jack J18: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
 #else
 		printf(">>> MODE: ANC Speaker Standby\n");
-		printf(">>> Output Jacks J17 & J19: Left=Mute(0), Right=Ref Mic\n");
-		printf(">>> Output Jacks J18 & J20: Left=Err Mic, Right=Ref Mic\n");
+		printf(">>> Output Jack J17: Left=Mute(0), Right=Ref Mic\n");
+		printf(">>> Output Jack J18: Left=Err Mic, Right=Ref Mic\n");
 #endif
 		printf("=======================================================\n\n");
 		fflush(stdout);
