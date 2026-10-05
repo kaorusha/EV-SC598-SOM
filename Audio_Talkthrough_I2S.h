@@ -25,8 +25,12 @@ to the terms of the associated Analog Devices License Agreement.
 /* Enable this macro for continuous audio */
 #define ADI_CONFIG_CONTINUOUS_AUDIO		1
 
-
-
+/* 
+ * DMA Buffer Size (TDM Mode: 50 frames per buffer block): 
+ * COUNT = 200 (50 frames * 4 ADC channels).
+ * TX Buffer uses COUNT * 2 = 400 words (50 frames * 8 DAC channels).
+ * Exactly matches official verified Audio_Talkthrough_TDM configuration.
+ */
 #define COUNT 200
 
 #define SPORT_DEVICE_4A 			4u			/* SPORT device number */
