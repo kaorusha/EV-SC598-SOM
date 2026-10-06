@@ -37,7 +37,7 @@ to the terms of the associated Analog Devices License Agreement.
  */
 #define TALKTHROUGH_MODE 1
 
-/* Digital gain multiplier for bypass talkthrough listening (1 = 1x unity, 2 = 2x/+6dB, 4 = 4x/+12dB) */
+/* Digital gain multiplier for bypass talkthrough listening (1 = 1x unity, 2 = 2x/+6dB, 4 = 4x/+12dB, 8 = 8x/+18dB) */
 #define TALKTHROUGH_GAIN 1
 
 /* Enable Console logging inside SPORT callback (0 = disabled for clickless audio, 1 = debug log) */
@@ -80,7 +80,7 @@ struct Config_Table Config_array_DAC[28] = {
 				{     ADAU1962_DAC_PWR3,		0xaa},
 				{     ADAU1962_PDN_CTRL_2,	    0x00}, /* Power up DAC 1~8 (0x00 = all active in ADAU1962) */
 				{     ADAU1962_PDN_CTRL_3,	    0x00}, /* Power up DAC 9~12 */
-				{     ADAU1962_DAC_CTRL0,		0x10}  /* TDM4 mode (48kHz, 4ch on DSDATA1: DAC 1/2=J4/J17, DAC 3/4=J18) */
+				{     ADAU1962_DAC_CTRL0,		0x90}  /* 192kHz TDM4 mode (DAC 1/2=J17, DAC 3/4=J18) */
 
 };
 
@@ -88,7 +88,7 @@ struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_BOOST			,	0x00},
 		 {ADAU1979_REG_MICBIAS			,	0x00},
 		 {ADAU1979_REG_BLOCK_POWER_SAI	,	0x30},
-		 {ADAU1979_REG_SAI_CTRL0		,	0x13}, /* TDM4 48kHz (sync with DAC TDM4 BCLK) */
+		 {ADAU1979_REG_SAI_CTRL0		,	0x15}, /* 192kHz TDM4 (sync with DAC TDM4 BCLK) */
 		 {ADAU1979_REG_SAI_CTRL1		,	0x08}, /* 32-bit slot, Slave to DAC clock */
 		 {ADAU1979_REG_CMAP12			,	0x01},
 		 {ADAU1979_REG_CMAP34			,	0x23},
