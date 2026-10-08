@@ -88,8 +88,8 @@ struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_BOOST			,	0x00},
 		 {ADAU1979_REG_MICBIAS			,	0x00},
 		 {ADAU1979_REG_BLOCK_POWER_SAI	,	0x30},
-		 {ADAU1979_REG_SAI_CTRL0		,	0x15}, /* 192kHz TDM4 (sync with DAC TDM4 BCLK) */
-		 {ADAU1979_REG_SAI_CTRL1		,	0x08}, /* 32-bit slot, Slave to DAC clock */
+		 {ADAU1979_REG_SAI_CTRL0		,	0x14}, /* TDM4 (bits 5:3=010), FS 192kHz (bits 2:0=100) */
+		 {ADAU1979_REG_SAI_CTRL1		,	0x08}, /* SDATAOUT1 (bit 7=0), Pulse (bit 3=1), Slave to DAC clock (bit 0=0) */
 		 {ADAU1979_REG_CMAP12			,	0x01},
 		 {ADAU1979_REG_CMAP34			,	0x23},
 		 {ADAU1979_REG_SAI_OVERTEMP		,	0xf0},
