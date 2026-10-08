@@ -116,7 +116,12 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         const float *px = &x_history[anc_buf_idx + ANC_X_HIST_SIZE];
         float y_n = fir_conv_1024(w_coeffs, px);
 
-        // 5. 雙鏡像更新抗噪輸出歷史
+        // [P0 修正]: 必須先限幅，才能寫入反饋歷史。否則估計的反饋波形與實際喇叭播出的波形會產生致命偏差！
+        if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
+        if (y_n > ANC_SAFE_OUTPUT_LIMIT)  y_n = ANC_SAFE_OUTPUT_LIMIT;
+        if (y_n < -ANC_SAFE_OUTPUT_LIMIT) y_n = -ANC_SAFE_OUTPUT_LIMIT;
+
+        // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅後的 y_n)
         y_history[y_buf_idx] = y_n;
         y_history[y_buf_idx + ANC_Y_HIST_SIZE] = y_n;
         if (++y_buf_idx >= ANC_Y_HIST_SIZE) y_buf_idx = 0;
@@ -130,7 +135,8 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         float e_n = d_n;
 
         // 8. 功率追蹤與歸一化步長 (NLMS)
-        px_power = 0.999f * px_power + 0.001f * (x_prime_n * x_prime_n);
+        // 使用 IIR 濾波器計算參考訊號的短期平均功率
+        px_power = ANC_PWR_SMOOTH_ALPHA * px_power + ANC_PWR_SMOOTH_BETA * (x_prime_n * x_prime_n);
         float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
         float norm_mu = ANC_MU / p_eff;
         if (norm_mu > ANC_MAX_MU) norm_mu = ANC_MAX_MU; 
@@ -143,11 +149,6 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 
         // 10. 循環指標自增
         if (++anc_buf_idx >= ANC_X_HIST_SIZE) anc_buf_idx = 0;
-
-        // 11. 數值保護與安全限幅
-        if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
-        if (y_n > ANC_SAFE_OUTPUT_LIMIT)  y_n = ANC_SAFE_OUTPUT_LIMIT;
-        if (y_n < -ANC_SAFE_OUTPUT_LIMIT) y_n = -ANC_SAFE_OUTPUT_LIMIT;
 
         // 12. 寫入 TDM4 輸出緩衝區 (4 channels per audio frame):
         //   - 喇叭端 (J17): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n)

@@ -17,11 +17,13 @@
 #define ANC_X_HIST_SIZE     ((ANC_W_TAPS > SECOND_PATH_TAPS) ? (ANC_W_TAPS) : (SECOND_PATH_TAPS))
 #define ANC_Y_HIST_SIZE     (FEEDBACK_PATH_TAPS)
 
-#define ANC_MU              0.007f  // 收斂步長
-#define ANC_LEAK            0.00001f// 漏洩係數 (防止阻帶發散)
-#define ANC_EPSILON         0.005f  // 功率門檻底限 (防止靜音時除以接近0導致步長暴增)
-#define ANC_MAX_MU          0.005f  // 歸一化步長上限保護 (防發散震盪)
-#define ANC_SAFE_OUTPUT_LIMIT 0.20f // 初測安全限幅 (約 -14 dBFS，防破音與大音量爆音)
+#define ANC_MU              0.00175f // 192kHz 下的收斂步長 (原 48kHz 為 0.007)
+#define ANC_LEAK            0.00001f // 漏洩係數 (防止阻帶發散)
+#define ANC_EPSILON         0.005f   // 功率門檻底限 (防止靜音時除以接近0導致步長暴增)
+#define ANC_MAX_MU          0.00125f // 192kHz 下的歸一化步長上限保護 (原 48kHz 為 0.005)
+#define ANC_PWR_SMOOTH_ALPHA 0.99975f // 功率估計 IIR 平滑常數 (歷史權重)
+#define ANC_PWR_SMOOTH_BETA  0.00025f // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
+#define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS，防破音與大音量爆音)
 
 // TDM4 雙端子獨立輸出模式設定 (Slot 0,1 -> J4/J17 喇叭端子; Slot 2,3 -> J18 電腦/NI-9234 監聽端子):
 // 0 = 雙孔直通驗證模式 (當前設定，用於先確認雙孔獨立輸出與監聽正常):
