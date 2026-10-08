@@ -80,7 +80,7 @@ struct Config_Table Config_array_DAC[28] = {
 				{     ADAU1962_DAC_PWR3,		0xaa},
 				{     ADAU1962_PDN_CTRL_2,	    0x00}, /* Power up DAC 1~8 (0x00 = all active in ADAU1962) */
 				{     ADAU1962_PDN_CTRL_3,	    0x00}, /* Power up DAC 9~12 */
-				{     ADAU1962_DAC_CTRL0,		0x90}  /* 192kHz TDM4 mode (DAC 1/2=J17, DAC 3/4=J18) */
+				{     ADAU1962_DAC_CTRL0,		0x16}  /* 192kHz Low Delay Mode (bits 2:1=11), TDM4 mode (bits 5:3=010) */
 
 };
 
