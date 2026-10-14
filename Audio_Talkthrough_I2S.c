@@ -58,7 +58,7 @@ struct Config_Table Config_array_DAC[28] = {
 		   	    {     ADAU1962_PDN_CTRL_3,	    0x0f},
 		   	    {     ADAU1962_DAC_CTRL0,		0x01},
 		   	    {     ADAU1962_DAC_CTRL1,		0x01},
-		   	    {     ADAU1962_DAC_CTRL2,		0x00},
+		   	    {     ADAU1962_DAC_CTRL2,		0x06}, /* 128x fs OSR (bit 1=1 for 192kHz), TDM 32-BCLK slot (bit 4=0), Auto Mute EN (bit 2=1) */
 		   	    {     ADAU1962_DAC_MUTE1,	    0x0},
 		   	    {     ADAU1962_DAC_MUTE2,	    0x00},
 		   	    {     ADAU1962_MSTR_VOL,		0x00},
@@ -98,7 +98,7 @@ struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_POST_ADC_GAIN3 	,	0xA0},
 		 {ADAU1979_REG_POST_ADC_GAIN4 	,	0xA0},
 		 {ADAU1979_REG_ADC_CLIP			,	0x00},
-		 {ADAU1979_REG_DC_HPF_CAL		,	0x00},
+		 {ADAU1979_REG_DC_HPF_CAL		,	0x0F}, /* Enable DC HPF on channels 1~4 to eliminate DC bias for adaptive filter stability */
 		 {ADAU1979_REG_BLOCK_POWER_SAI	,	0x3f},
 		 {ADAU1979_REG_MISC_CONTROL		,	0x00}
 };
@@ -651,7 +651,7 @@ static int ADAU_1962_Pllinit(void)
 		asm("nop;");
 	}
 
-	Write_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL1,0x22);
+	Write_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL1,0x2A); /* Bit 3=1: Enable DAC Automute on PLL Unlock; Bit 1=1: VREF ON */
 	delay1=0xffff;
 	while(delay1--)
 	{
@@ -714,7 +714,7 @@ static int ADAU_1979_Pllinit(void)
 	}
 
    	Write_TWI_8bit_Reg(ADAU1979_REG_POWER,0x01);
-	Write_TWI_8bit_Reg(ADAU1979_REG_PLL,0x03);
+	Write_TWI_8bit_Reg(ADAU1979_REG_PLL,0x43); /* 0x40 (PLL_MUTE enabled) + 0x03 (MCS=011 for 192kHz) */
 	status=Read_TWI_8bit_Reg(ADAU1979_REG_PLL);
 	while(delay1--)
 	{
