@@ -151,20 +151,11 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         if (++anc_buf_idx >= ANC_X_HIST_SIZE) anc_buf_idx = 0;
 
         // 12. 寫入 TDM4 輸出緩衝區 (4 channels per audio frame):
-        //   - 喇叭端 (J17): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n)
-        //   - 監聽端 (J18): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic
-#if (ANC_OUTPUT_MODE == 0)
-        // [模式 0: 直通硬體驗證模式]
-        pTxBuf[i + 0] = 0;           // J17 左聲道 (Tip): 靜音 = 0
-        pTxBuf[i + 1] = pRxBuf[i+1]; // J17 右聲道 (Ring): 播放 Reference Mic 音樂
-        pTxBuf[i + 2] = pRxBuf[i];   // J18 左聲道 (Tip): 原始 Error Mic
-        pTxBuf[i + 3] = pRxBuf[i+1]; // J18 右聲道 (Ring): 原始 Reference Mic
-#else
-        // [模式 1: 正式 ANC 降噪 + 獨立監聽模式]
-        pTxBuf[i + 0] = 0;                          // J17 左聲道 (Tip): 自動靜音 = 0
-        pTxBuf[i + 1] = (int)(y_n * 2147483647.0f); // J17 右聲道 (Ring): 反相抗噪波 y(n)
-        pTxBuf[i + 2] = pRxBuf[i];                  // J18 左聲道 (Tip): 原始 Error Mic
-        pTxBuf[i + 3] = pRxBuf[i+1];                // J18 右聲道 (Ring): 原始 Reference Mic
-#endif
+        //   - 喇叭端 (J18): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n)
+        //   - 監聽端 (J4/J17): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic
+        pTxBuf[i + 0] = 0;                          // J18 左聲道 (Tip): 自動靜音 = 0
+        pTxBuf[i + 1] = (int)(y_n * 2147483647.0f); // J18 右聲道 (Ring): 反相抗噪波 y(n)
+        pTxBuf[i + 2] = pRxBuf[i];                  // J17 左聲道 (Tip): 原始 Error Mic
+        pTxBuf[i + 3] = pRxBuf[i+1];                // J17 右聲道 (Ring): 原始 Reference Mic
     }
 }

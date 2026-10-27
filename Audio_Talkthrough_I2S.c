@@ -25,23 +25,64 @@ to the terms of the associated Analog Devices License Agreement.
 #include "Audio_Talkthrough_I2S.h"
 #include "anc_fxnlms.h"
 
-/* ANC Enable Switch: 1 = Active ANC, 0 = Bypass (Pure Audio Talkthrough) */
-#define ANC_ENABLE 0
-
-/* 
- * Bypass Talkthrough Mode (when ANC_ENABLE == 0):
- * 1 = Full Stereo Talkthrough (Left = ADC[0], Right = ADC[1])
- *     -> Use this mode to test music! Both Left and Right will bypass music and mics!
- * 0 = Speaker Standby Mode (Left = Mute 0, Right = Ref Mic)
- *     -> Left speaker is muted, Right speaker plays Ref Mic (ready for ANC).
+/*
+ * Application Mode (single switch):
+ *   APP_MODE_ANC          : FxNLMS ANC.
+ *                           J18 Right = anti-noise y(n), J4/J17 = Error / Ref Mic monitor.
+ *   APP_MODE_PATH_MEASURE : REW bridge for secondary / feedback path measurement.
+ *                           J16 Left = REW timing reference (chirp), J16 Right = REW sweep.
+ *                           J18 Right = sweep to speaker (Left muted).
+ *                           J17 Left  = Error Mic + chirp (secondary path), J17 Right = Ref Mic + chirp (feedback path).
+ *   APP_MODE_DIAG_MIC     : Mic passthrough, no ANC. J18 Right = Ref Mic, J4/J17 = Error / Ref Mic.
+ *   APP_MODE_DIAG_LINE_IN : J16 Left/Right -> J18 and J4/J17 Left/Right (check PC line-in, use with slot peak meter).
+ *   APP_MODE_DIAG_DAC_ID  : DAC slot s beeps (s+1) times every 2 s, no input (check slot -> jack/ear wiring).
  */
-#define TALKTHROUGH_MODE 1
+#define APP_MODE_ANC            0
+#define APP_MODE_PATH_MEASURE   1
+#define APP_MODE_DIAG_MIC       2
+#define APP_MODE_DIAG_LINE_IN   3
+#define APP_MODE_DIAG_DAC_ID    4
 
-/* Digital gain multiplier for bypass talkthrough listening (1 = 1x unity, 2 = 2x/+6dB, 4 = 4x/+12dB, 8 = 8x/+18dB) */
-#define TALKTHROUGH_GAIN 1
+#define APP_MODE                APP_MODE_PATH_MEASURE  /* Select application mode here */
 
-/* Enable Console logging inside SPORT callback (0 = disabled for clickless audio, 1 = debug log) */
-#define ENABLE_CALLBACK_PRINTF 0
+/*
+ * Gain staging (measured, Windows volume 100%): REW -12 dBFS -> J16 slot peak -6 dBFS (tracks 1:1).
+ * Idle broadband floor on every slot is about -60 dBFS peak.
+ */
+/* Digital gain for electrical timing chirp mixed into mic return: -6 dBFS * 0.05 (-26 dB) = -32 dBFS, ~28 dB above floor */
+#define CALIBRATION_CHIRP_GAIN  0.05f
+#define CALIBRATION_SWEEP_GAIN  1      /* Integer gain; J16 already peaks near -6 dBFS, 2x would hit 0 dBFS */
+
+/*
+ * Hardware Slot Mapping on EV-SOMCRR-EZKIT:
+ * ADC (ADAU1979), Config_array_ADC registers:
+ *   CMAP12 = 0x01: AIN1 -> Slot 1, AIN2 -> Slot 0
+ *   CMAP34 = 0x23: AIN3 -> Slot 3, AIN4 -> Slot 2
+ *   Verified with APP_MODE_DIAG_LINE_IN + slot peak meter:
+ *     Slot 0 = Error Mic (enclosure outlet), Slot 1 = Ref Mic (next to fan)
+ *     Slot 2 = J16 Right (PC R), Slot 3 = J16 Left (PC L)
+ * DAC (ADAU1962), verified with APP_MODE_DIAG_DAC_ID:
+ *   Slot 0/1 = J18 Left/Right (speaker)
+ *   Slot 2/3 = J17 Left/Right (monitor to PC Mic In; J4 = J17 with headphone amp)
+ *   NOTE: Silkscreen says J17 = DAC1/2, J18 = DAC3/4. The DAC frame start is offset by half a
+ *         TDM4 frame (2 slots) from SPORT 4A, so DAC1/2 picks up SPORT slots 2/3.
+ *         Cause: DAC_CTRL1 defaults (LRCLK_MODE=0 50% duty, LRCLK_POL=0 Left/Odd = LRCLK Low) make the
+ *         DAC start its frame on the falling edge, while SPORT / ADC start on the rising edge.
+ *         Kept as-is on purpose (DAC_CTRL1 = 0x01); LRCLK_POL=1 (0x21) should align it but is untested.
+ *         ADC side is not affected (verified with APP_MODE_DIAG_LINE_IN).
+ *
+ * REW Channel Configuration:
+ *   - Output:             R (PC Right -> J16 Ring -> Slot 2 -> Sweep to Speaker)
+ *   - Timing ref output:  L (PC Left  -> J16 Tip  -> Slot 3 -> Chirp to J17)
+ */
+#define J12_ERR_MIC_SLOT        0   /* Error Mic (enclosure outlet) */
+#define J12_REF_MIC_SLOT        1   /* Ref Mic (next to fan) */
+#define J16_SWEEP_SLOT          2   /* J16 AIN4 (PC Right = REW Sweep) */
+#define J16_CHIRP_SLOT          3   /* J16 AIN3 (PC Left  = REW Timing Reference) */
+
+/* Per-slot ADC peak meter, printed from main loop (not from the SPORT callback) */
+#define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
+#define PEAK_METER_CALLBACKS    24000u  /* 192kHz / 16 frames = 12000 callbacks/s -> print every ~2 s */
 
 struct Config_Table
 {
@@ -57,7 +98,7 @@ struct Config_Table Config_array_DAC[28] = {
 		   	    {     ADAU1962_PDN_CTRL_2,	    0xff},
 		   	    {     ADAU1962_PDN_CTRL_3,	    0x0f},
 		   	    {     ADAU1962_DAC_CTRL0,		0x01},
-		   	    {     ADAU1962_DAC_CTRL1,		0x01},
+		   	    {     ADAU1962_DAC_CTRL1,		0x01}, /* Master, LRCLK 50% duty + normal polarity: DAC slot 0 = SPORT slot 2 (see slot mapping NOTE) */
 		   	    {     ADAU1962_DAC_CTRL2,		0x06}, /* 128x fs OSR (bit 1=1 for 192kHz), TDM 32-BCLK slot (bit 4=0), Auto Mute EN (bit 2=1) */
 		   	    {     ADAU1962_DAC_MUTE1,	    0x0},
 		   	    {     ADAU1962_DAC_MUTE2,	    0x00},
@@ -181,6 +222,122 @@ uint8_t             SpuMemory[ADI_SPU_MEMORY_SIZE];
 /* Dev buffer for configuring ADC-DAC through TWI*/
 static uint8_t devBuffer[BUFFER_SIZE];
 
+#if ENABLE_SLOT_PEAK_METER
+/* Max |sample| per ADC slot since last print, updated in SPORT callback */
+static volatile int g_SlotPeak[4];
+
+static void Update_Slot_Peak(const int *pIn)
+{
+	int i, s, v;
+	for(i=0; i<COUNT; i+=4)
+	{
+		for(s=0; s<4; s++)
+		{
+			v = pIn[i+s];
+			v = (v < 0) ? -(v + 1) : v; /* avoid overflow on INT_MIN */
+			if (v > g_SlotPeak[s]) g_SlotPeak[s] = v;
+		}
+	}
+}
+#endif
+
+#if (APP_MODE == APP_MODE_DIAG_DAC_ID)
+#define ID_TONE_TABLE_LEN   192u     /* 1 kHz at 192 kHz */
+#define ID_BEEP_ON          19200u   /* 100 ms tone per beep */
+#define ID_BEEP_PERIOD      48000u   /* 250 ms per beep */
+#define ID_CYCLE            384000u  /* 2 s cycle (multiple of ID_TONE_TABLE_LEN) */
+
+static int g_IdTone[ID_TONE_TABLE_LEN];
+static uint32_t g_IdSample = 0;
+
+static void Id_Tone_Init(void)
+{
+	uint32_t n;
+	for(n=0; n<ID_TONE_TABLE_LEN; n++)
+	{
+		g_IdTone[n] = (int)(0.1f * 2147483647.0f * sinf(6.2831853f * (float)n / (float)ID_TONE_TABLE_LEN)); /* -20 dBFS */
+	}
+}
+
+/* DAC Slot ID: slot s beeps (s+1) times per cycle */
+static void Id_Tone_Process_Block(int *pOut)
+{
+	int i, s;
+	uint32_t beep, on;
+	for(i=0; i<COUNT; i+=4)
+	{
+		int tone = g_IdTone[g_IdSample % ID_TONE_TABLE_LEN];
+		beep = g_IdSample / ID_BEEP_PERIOD;
+		on   = ((g_IdSample % ID_BEEP_PERIOD) < ID_BEEP_ON) ? 1u : 0u;
+		for(s=0; s<4; s++)
+		{
+			pOut[i+s] = (on && (beep <= (uint32_t)s)) ? tone : 0;
+		}
+		g_IdSample = (g_IdSample + 1u) % ID_CYCLE;
+	}
+}
+#endif
+
+#if (APP_MODE == APP_MODE_PATH_MEASURE)
+/* Float to int32 with saturation (2147483520.0f is the largest float below 2^31) */
+static inline int Saturate_To_Int(float x)
+{
+	if (x >  2147483520.0f) return  2147483647;
+	if (x < -2147483648.0f) return (-2147483647 - 1);
+	return (int)x;
+}
+
+/* REW path measurement bridge */
+static void Path_Measure_Process_Block(const int *pIn, int *pOut)
+{
+	int i;
+	for(i=0; i<COUNT; i+=4)
+	{
+		float chirp = (float)pIn[i + J16_CHIRP_SLOT] * CALIBRATION_CHIRP_GAIN;
+
+		pOut[i+0] = 0;                                                          /* J18 Left  (Tip):  Mute */
+		pOut[i+1] = pIn[i + J16_SWEEP_SLOT] * CALIBRATION_SWEEP_GAIN;           /* J18 Right (Ring): Sweep to Speaker */
+		pOut[i+2] = Saturate_To_Int((float)pIn[i + J12_ERR_MIC_SLOT] + chirp);  /* J17 Left  (Tip):  Sec Path (Err + Chirp) */
+		pOut[i+3] = Saturate_To_Int((float)pIn[i + J12_REF_MIC_SLOT] + chirp);  /* J17 Right (Ring): FB Path (Ref + Chirp) */
+	}
+}
+#endif
+
+/* Route one DMA block (COUNT samples = 16 TDM4 frames) according to APP_MODE; shared by both ping-pong buffers */
+static void Process_Block(const int *pIn, int *pOut)
+{
+#if ENABLE_SLOT_PEAK_METER
+	Update_Slot_Peak(pIn);
+#endif
+#if (APP_MODE == APP_MODE_ANC)
+	ANC_Process_Block(pIn, pOut, COUNT);
+#elif (APP_MODE == APP_MODE_PATH_MEASURE)
+	Path_Measure_Process_Block(pIn, pOut);
+#elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
+	Id_Tone_Process_Block(pOut);
+#elif (APP_MODE == APP_MODE_DIAG_MIC) || (APP_MODE == APP_MODE_DIAG_LINE_IN)
+	{
+		int i;
+		for(i=0; i<COUNT; i+=4)
+		{
+#if (APP_MODE == APP_MODE_DIAG_MIC)
+			pOut[i+0] = 0;                          /* J18 Left  (Tip):  Mute */
+			pOut[i+1] = pIn[i + J12_REF_MIC_SLOT];  /* J18 Right (Ring): Ref Mic */
+			pOut[i+2] = pIn[i + J12_ERR_MIC_SLOT];  /* J17 Left  (Tip):  Error Mic */
+			pOut[i+3] = pIn[i + J12_REF_MIC_SLOT];  /* J17 Right (Ring): Ref Mic */
+#else
+			pOut[i+0] = pIn[i + J16_CHIRP_SLOT];    /* J18 Left  <- J16 Left  */
+			pOut[i+1] = pIn[i + J16_SWEEP_SLOT];    /* J18 Right <- J16 Right */
+			pOut[i+2] = pIn[i + J16_CHIRP_SLOT];    /* J17 Left  <- J16 Left  */
+			pOut[i+3] = pIn[i + J16_SWEEP_SLOT];    /* J17 Right <- J16 Right */
+#endif
+		}
+	}
+#else
+#error "Unknown APP_MODE"
+#endif
+}
+
 
 static void SPORTCallback(
     void        *pAppHandle,
@@ -188,9 +345,6 @@ static void SPORTCallback(
     void        *pArg
 )
 {
-	int i, j;
-	static uint32_t s_cbCount = 0;
-
     /* CASEOF (event type) */
     switch (nEvent)
     {
@@ -198,61 +352,15 @@ static void SPORTCallback(
         case ADI_SPORT_EVENT_RX_BUFFER_PROCESSED:
         		TestCallbackCount +=1;
         		CallbackCount +=1;
-        		s_cbCount++;
-#if ENABLE_CALLBACK_PRINTF
-        		if (s_cbCount == 1 || s_cbCount == 100 || (s_cbCount % 5000 == 0))
-        		{
-        			printf("[SPORTCallback #%u] ADC: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X | DAC: [0]=0x%08X [1]=0x%08X [2]=0x%08X [3]=0x%08X\n",
-        				   s_cbCount,
-        				   int_SP0ABuffer4[0], int_SP0ABuffer4[1], int_SP0ABuffer4[2], int_SP0ABuffer4[3],
-        				   int_SP0ABuffer1[0], int_SP0ABuffer1[1], int_SP0ABuffer1[2], int_SP0ABuffer1[3]);
-        			fflush(stdout);
-        		}
-#endif
+
         		if(CallbackCount==1)
         		{
-#if ANC_ENABLE
-        		   ANC_Process_Block(int_SP0ABuffer4, int_SP0ABuffer1, COUNT);
-#else
-        		   for(i=0; i<COUNT; i+=4)
-        		   {
-#if (TALKTHROUGH_MODE == 1)
-        			   /* Full Stereo Bypass Test Mode: Left = ADC0 (Err/Music L), Right = ADC1 (Ref/Music R) */
-        			   int_SP0ABuffer1[i+0] = int_SP0ABuffer4[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
-        			   int_SP0ABuffer1[i+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
-#else
-        			   /* ANC Speaker Standby Mode: Left = 0 (Mute), Right = Ref Mic (ready for ANC) */
-        			   int_SP0ABuffer1[i+0] = 0;                                       /* J17 Left  (Tip): Mute */
-        			   int_SP0ABuffer1[i+1] = int_SP0ABuffer4[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
-#endif
-        			   /* Monitor Out: Broadcast to J18 (DAC 3/4) */
-        			   int_SP0ABuffer1[i+2] = int_SP0ABuffer4[i+0];                    /* J18 Left  (Tip):  Error Mic */
-        			   int_SP0ABuffer1[i+3] = int_SP0ABuffer4[i+1];                    /* J18 Right (Ring): Ref Mic */
-        		   }
-#endif
+        		   Process_Block(int_SP0ABuffer4, int_SP0ABuffer1);
         		}
 
         		if(CallbackCount==2)
 				{
-#if ANC_ENABLE
-        		   ANC_Process_Block(int_SP0ABuffer5, int_SP0ABuffer2, COUNT);
-#else
-				   for(i=0; i<COUNT; i+=4)
-				   {
-#if (TALKTHROUGH_MODE == 1)
-					   /* Full Stereo Bypass Test Mode: Left = ADC0 (Err/Music L), Right = ADC1 (Ref/Music R) */
-					   int_SP0ABuffer2[i+0] = int_SP0ABuffer5[i+0] * TALKTHROUGH_GAIN; /* J17 Left  (Tip)  */
-					   int_SP0ABuffer2[i+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring) */
-#else
-					   /* ANC Speaker Standby Mode: Left = 0 (Mute), Right = Ref Mic (ready for ANC) */
-					   int_SP0ABuffer2[i+0] = 0;                                       /* J17 Left  (Tip): Mute */
-					   int_SP0ABuffer2[i+1] = int_SP0ABuffer5[i+1] * TALKTHROUGH_GAIN; /* J17 Right (Ring): Ref Mic */
-#endif
-					   /* Monitor Out: Broadcast to J18 (DAC 3/4) */
-					   int_SP0ABuffer2[i+2] = int_SP0ABuffer5[i+0];                    /* J18 Left  (Tip):  Error Mic */
-					   int_SP0ABuffer2[i+3] = int_SP0ABuffer5[i+1];                    /* J18 Right (Ring): Ref Mic */
-				   }
-#endif
+				   Process_Block(int_SP0ABuffer5, int_SP0ABuffer2);
 				   CallbackCount=0;
 				}
 
@@ -807,11 +915,13 @@ int main(int argc, char *argv[])
 		Result=ADAU_1979_init();
 	}
 
-#if ANC_ENABLE
+#if (APP_MODE == APP_MODE_ANC)
 	/* ANC Algorithm Initialization */
 	ANC_Init();
 	printf("[Step 7] ANC Algorithm Initialized\n");
 	fflush(stdout);
+#elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
+	Id_Tone_Init();
 #endif
 
 	/* SPORT Initialization */
@@ -834,14 +944,31 @@ int main(int argc, char *argv[])
 	{
 		printf("\n=======================================================\n");
 		printf(">>> SYSTEM READY: Running audio streaming talkthrough <<<\n");
-#if (TALKTHROUGH_MODE == 1)
-		printf(">>> MODE: Full Stereo Bypass Test (Gain = %dx)\n", TALKTHROUGH_GAIN);
-		printf(">>> Output Jack J17: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
-		printf(">>> Output Jack J18: Left=ADC[0] (Err/Music L), Right=ADC[1] (Ref/Music R)\n");
-#else
-		printf(">>> MODE: ANC Speaker Standby\n");
-		printf(">>> Output Jack J17: Left=Mute(0), Right=Ref Mic\n");
-		printf(">>> Output Jack J18: Left=Err Mic, Right=Ref Mic\n");
+#if (APP_MODE == APP_MODE_ANC)
+		printf(">>> MODE: ANC (FxNLMS)\n");
+		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
+		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
+#elif (APP_MODE == APP_MODE_PATH_MEASURE)
+		printf(">>> MODE: REW Path Measurement Bridge (2-Step Timing & High-SNR Sweeps)\n");
+		printf(">>> Input Jack J12:  Slot %d = Ref Mic, Slot %d = Error Mic\n", J12_REF_MIC_SLOT, J12_ERR_MIC_SLOT);
+		printf(">>> Input Jack J16:  Slot %d = REW Sweep (R), Slot %d = REW Timing Ref (L)\n", J16_SWEEP_SLOT, J16_CHIRP_SLOT);
+		printf(">>> Output Jack J18: Left = Mute, Right = Sweep to Speaker Amp (Gain = %dx)\n", CALIBRATION_SWEEP_GAIN);
+		printf(">>> Output Jack J17: Left (Tip) = Err + Chirp, Right (Ring) = Ref + Chirp (Chirp Gain = %.4fx)\n", CALIBRATION_CHIRP_GAIN);
+		printf(">>> REW SETTINGS:\n");
+		printf(">>>   - Output:             R (Sweep to Speaker)\n");
+		printf(">>>   - Timing ref output:  L (Chirp mixed into J17)\n");
+#elif (APP_MODE == APP_MODE_DIAG_MIC)
+		printf(">>> MODE: DIAG Mic Passthrough\n");
+		printf(">>> Output Jack J18:    Left = Mute, Right = Ref Mic\n");
+		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
+#elif (APP_MODE == APP_MODE_DIAG_LINE_IN)
+		printf(">>> MODE: DIAG J16 Line-In Check\n");
+		printf(">>> J18 & J4/J17 Left  <- J16 Left  (Slot %d)\n", J16_CHIRP_SLOT);
+		printf(">>> J18 & J4/J17 Right <- J16 Right (Slot %d)\n", J16_SWEEP_SLOT);
+#elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
+		printf(">>> MODE: DIAG DAC Slot ID Beeps (1 kHz, -20 dBFS, every 2 s)\n");
+		printf(">>> Slot 0 = 1 beep, Slot 1 = 2 beeps, Slot 2 = 3 beeps, Slot 3 = 4 beeps\n");
+		printf(">>> Expected: J18 L/R = 1/2 beeps, J4/J17 L/R = 3/4 beeps\n");
 #endif
 		printf("=======================================================\n\n");
 		fflush(stdout);
@@ -882,7 +1009,33 @@ int main(int argc, char *argv[])
 		}
 	}
 #elif (ADI_CONFIG_CONTINUOUS_AUDIO==1)
+#if ENABLE_SLOT_PEAK_METER
+	{
+		uint32_t lastCount = TestCallbackCount;
+		int s, peak[4];
+		while(1)
+		{
+			if ((uint32_t)(TestCallbackCount - lastCount) >= PEAK_METER_CALLBACKS)
+			{
+				lastCount = TestCallbackCount;
+				for(s=0; s<4; s++)
+				{
+					peak[s] = g_SlotPeak[s];
+					g_SlotPeak[s] = 0;
+				}
+				printf("[PEAK dBFS #%u] S0=%6.1f  S1=%6.1f  S2=%6.1f  S3=%6.1f\n",
+					   lastCount,
+					   20.0f*log10f(((float)peak[0] + 1.0f) / 2147483648.0f),
+					   20.0f*log10f(((float)peak[1] + 1.0f) / 2147483648.0f),
+					   20.0f*log10f(((float)peak[2] + 1.0f) / 2147483648.0f),
+					   20.0f*log10f(((float)peak[3] + 1.0f) / 2147483648.0f));
+				fflush(stdout);
+			}
+		}
+	}
+#else
 	while(1);
+#endif
 #endif
 }
 

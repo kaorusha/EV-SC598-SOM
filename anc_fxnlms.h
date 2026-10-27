@@ -25,14 +25,12 @@
 #define ANC_PWR_SMOOTH_BETA  0.00025f // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
 #define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS，防破音與大音量爆音)
 
-// TDM4 雙端子獨立輸出模式設定 (Slot 0,1 -> J4/J17 喇叭端子; Slot 2,3 -> J18 電腦/NI-9234 監聽端子):
-// 0 = 雙孔直通驗證模式 (當前設定，用於先確認雙孔獨立輸出與監聽正常):
-//     - J4/J17 (DAC 1/2): 左喇叭靜音(0), 右喇叭直通播放 Ref Mic (觸碰 Ref Mic 右喇叭發聲)
-//     - J18    (DAC 3/4): Tip(左) = Error Mic, Ring(右) = Ref Mic (給電腦音效卡 / NI-9234 監聽)
-// 1 = 正式 ANC 降噪 + 雙孔獨立監聽模式:
-//     - J4/J17 (DAC 1/2): 左喇叭自動靜音(0), 右喇叭單獨輸出反相抗噪波 y(n)
-//     - J18    (DAC 3/4): Tip(左) = Error Mic 殘留誤差, Ring(右) = Ref Mic
-#define ANC_OUTPUT_MODE     0
+// TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):
+//     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出反相抗噪波 y(n)
+//     - J4/J17 (絲印 DAC 1/2, SPORT Slot 2/3): Tip(左) = Error Mic 殘留誤差, Ring(右) = Ref Mic
+//     (DAC_CTRL1 預設 LRCLK 50% duty + 正常極性，DAC frame 起點與 SPORT 差半個 TDM4 frame，
+//      故 DAC1/2 收到 Slot 2/3；以 APP_MODE_DIAG_DAC_ID 實測，刻意維持不改 register)
+// (麥克風直通驗證請改用 Audio_Talkthrough_I2S.c 的 APP_MODE_DIAG_MIC)
 
 // 對外 API 函式宣告
 void ANC_Init(void);
