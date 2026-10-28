@@ -24,6 +24,8 @@ to the terms of the associated Analog Devices License Agreement.
 #include <SRU.h>
 #include "Audio_Talkthrough_I2S.h"
 #include "anc_fxnlms.h"
+#define DO_CYCLE_COUNTS  /* enable START/STOP_CYCLE_COUNT macros (only used when ENABLE_CYCLE_METER = 1) */
+#include <cycle_count.h>
 
 /*
  * Application Mode (single switch):
@@ -83,6 +85,11 @@ to the terms of the associated Analog Devices License Agreement.
 /* Per-slot ADC peak meter, printed from main loop (not from the SPORT callback) */
 #define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
 #define PEAK_METER_CALLBACKS    24000u  /* 192kHz / 16 frames = 12000 callbacks/s -> print every ~2 s */
+
+/* Process_Block() cycle meter (avg / max per DMA block), printed from main loop every PEAK_METER_CALLBACKS */
+#define ENABLE_CYCLE_METER      0
+#define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
+#define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * 16.0f / 192000.0f)  /* 16 frames @ 192kHz = 83.3 us */
 
 struct Config_Table
 {
@@ -241,6 +248,13 @@ static void Update_Slot_Peak(const int *pIn)
 }
 #endif
 
+#if ENABLE_CYCLE_METER
+/* Process_Block() cycles since last print, updated in SPORT callback */
+static volatile uint32_t g_CycleMax = 0;
+static volatile uint32_t g_CycleSum = 0;  /* 24000 blocks x < 100k cycles fits in 32 bits */
+static volatile uint32_t g_CycleBlocks = 0;
+#endif
+
 #if (APP_MODE == APP_MODE_DIAG_DAC_ID)
 #define ID_TONE_TABLE_LEN   192u     /* 1 kHz at 192 kHz */
 #define ID_BEEP_ON          19200u   /* 100 ms tone per beep */
@@ -304,7 +318,24 @@ static void Path_Measure_Process_Block(const int *pIn, int *pOut)
 #endif
 
 /* Route one DMA block (COUNT samples = 16 TDM4 frames) according to APP_MODE; shared by both ping-pong buffers */
+static void Process_Block_Body(const int *pIn, int *pOut);
+
 static void Process_Block(const int *pIn, int *pOut)
+{
+#if ENABLE_CYCLE_METER
+	cycle_t t0, dt;
+	START_CYCLE_COUNT(t0);
+	Process_Block_Body(pIn, pOut);
+	STOP_CYCLE_COUNT(dt, t0);
+	if ((uint32_t)dt > g_CycleMax) g_CycleMax = (uint32_t)dt;
+	g_CycleSum += (uint32_t)dt;
+	g_CycleBlocks++;
+#else
+	Process_Block_Body(pIn, pOut);
+#endif
+}
+
+static void Process_Block_Body(const int *pIn, int *pOut)
 {
 #if ENABLE_SLOT_PEAK_METER
 	Update_Slot_Peak(pIn);
@@ -1009,15 +1040,43 @@ int main(int argc, char *argv[])
 		}
 	}
 #elif (ADI_CONFIG_CONTINUOUS_AUDIO==1)
-#if ENABLE_SLOT_PEAK_METER
+#if ENABLE_SLOT_PEAK_METER || ENABLE_CYCLE_METER
 	{
 		uint32_t lastCount = TestCallbackCount;
 		int s, peak[4];
+#if ENABLE_CYCLE_METER
+		cycle_t lastStamp;
+		START_CYCLE_COUNT(lastStamp);
+#endif
 		while(1)
 		{
 			if ((uint32_t)(TestCallbackCount - lastCount) >= PEAK_METER_CALLBACKS)
 			{
 				lastCount = TestCallbackCount;
+#if ENABLE_CYCLE_METER
+				{
+					uint32_t cmax = g_CycleMax, csum = g_CycleSum, cn = g_CycleBlocks;
+					float cavg, period;
+					cycle_t elapsed;
+					STOP_CYCLE_COUNT(elapsed, lastStamp);  /* core cycles since last print */
+					START_CYCLE_COUNT(lastStamp);
+					/* Measured block period in core cycles; should equal BLOCK_BUDGET_CYCLES if CORE_CLOCK_HZ is right */
+					period = (cn > 0u) ? ((float)elapsed / (float)cn) : 0.0f;
+					g_CycleMax = 0;
+					g_CycleSum = 0;
+					g_CycleBlocks = 0;
+					cavg = (cn > 0u) ? ((float)csum / (float)cn) : 0.0f;
+					printf("[CYCLES #%u] blocks=%u avg=%.0f (%.1f us, %.1f%%) max=%u (%.1f us, %.1f%%) budget=%.0f\n",
+						   lastCount, cn,
+						   cavg, cavg / CORE_CLOCK_HZ * 1e6f, 100.0f * cavg / BLOCK_BUDGET_CYCLES,
+						   cmax, (float)cmax / CORE_CLOCK_HZ * 1e6f, 100.0f * (float)cmax / BLOCK_BUDGET_CYCLES,
+						   BLOCK_BUDGET_CYCLES);
+					printf("[CYCLES #%u] measured block period=%.0f cycles (load avg %.1f%%)\n",
+						   lastCount, period, (period > 0.0f) ? (100.0f * cavg / period) : 0.0f);
+					fflush(stdout);
+				}
+#endif
+#if ENABLE_SLOT_PEAK_METER
 				for(s=0; s<4; s++)
 				{
 					peak[s] = g_SlotPeak[s];
@@ -1030,6 +1089,7 @@ int main(int argc, char *argv[])
 					   20.0f*log10f(((float)peak[2] + 1.0f) / 2147483648.0f),
 					   20.0f*log10f(((float)peak[3] + 1.0f) / 2147483648.0f));
 				fflush(stdout);
+#endif
 			}
 		}
 	}
