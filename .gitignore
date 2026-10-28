@@ -72,3 +72,6 @@ $RECYCLE.BIN/
 # ==============================================================================
 second_path.h
 feedback_path.h
+
+# Claude Code personal settings
+.claude/settings.local.json
