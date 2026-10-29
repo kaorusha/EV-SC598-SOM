@@ -86,7 +86,14 @@ to the terms of the associated Analog Devices License Agreement.
 #define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
 #define PEAK_METER_CALLBACKS    24000u  /* 192kHz / 16 frames = 12000 callbacks/s -> print every ~2 s */
 
-/* Process_Block() cycle meter (avg / max per DMA block), printed from main loop every PEAK_METER_CALLBACKS */
+/* Process_Block() cycle meter, printed from main loop every PEAK_METER_CALLBACKS (Release build only;
+ * Debug -O0 starves the main loop and nothing prints). Log fields are explained at the printf in main().
+ * Counts via <cycle_count.h>: EMUCLK increments once per core clock; 32-bit, wraps ~4.29 s, unsigned diff is safe.
+ * "period" = EMUCLK cycles between prints / blocks = real block interval (independent of CORE_CLOCK_HZ):
+ *   period ~= budget       -> real time
+ *   period ~= avg + ~1.4k  -> CPU saturated, DMA blocks dropped (avg excludes callback overhead)
+ * Ignore the first print: blocks count from boot, the elapsed stamp starts in main loop.
+ */
 #define ENABLE_CYCLE_METER      0
 #define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
 #define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * 16.0f / 192000.0f)  /* 16 frames @ 192kHz = 83.3 us */
@@ -1066,6 +1073,12 @@ int main(int argc, char *argv[])
 					g_CycleSum = 0;
 					g_CycleBlocks = 0;
 					cavg = (cn > 0u) ? ((float)csum / (float)cn) : 0.0f;
+					/* Line 1: #n      = TestCallbackCount at print time
+					 *         blocks  = blocks timed since last print
+					 *         avg/max = mean / slowest Process_Block_Body() cycles, shown as us and % of budget
+					 *         budget  = 16 frames @ 192 kHz in core cycles
+					 * Line 2: period  = measured cycles per block over the interval
+					 *         load    = avg / period, the true load without assuming CORE_CLOCK_HZ */
 					printf("[CYCLES #%u] blocks=%u avg=%.0f (%.1f us, %.1f%%) max=%u (%.1f us, %.1f%%) budget=%.0f\n",
 						   lastCount, cn,
 						   cavg, cavg / CORE_CLOCK_HZ * 1e6f, 100.0f * cavg / BLOCK_BUDGET_CYCLES,
