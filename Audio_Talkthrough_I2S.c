@@ -58,9 +58,11 @@ to the terms of the associated Analog Devices License Agreement.
 /*
  * Hardware Slot Mapping on EV-SOMCRR-EZKIT:
  * ADC (ADAU1979), Config_array_ADC registers:
- *   CMAP12 = 0x01: AIN1 -> Slot 1, AIN2 -> Slot 0
- *   CMAP34 = 0x23: AIN3 -> Slot 3, AIN4 -> Slot 2
- *   Verified with APP_MODE_DIAG_LINE_IN + slot peak meter:
+ *   SAI_CTRL1 = 0x00 (LRCLK 50% duty, same as DAC): the ADC frame starts half a TDM4 frame (2 slots)
+ *   after SPORT 4B, so ADC slot k lands in SPORT slot (k+2)%4. CMAP compensates for it:
+ *   CMAP12 = 0x23: AIN1 -> ADC Slot 3 (SPORT 1), AIN2 -> ADC Slot 2 (SPORT 0)
+ *   CMAP34 = 0x01: AIN3 -> ADC Slot 1 (SPORT 3), AIN4 -> ADC Slot 0 (SPORT 2)
+ *   Verified with APP_MODE_DIAG_LINE_IN + slot peak meter (SPORT slots):
  *     Slot 0 = Error Mic (enclosure outlet), Slot 1 = Ref Mic (next to fan)
  *     Slot 2 = J16 Right (PC R), Slot 3 = J16 Left (PC L)
  * DAC (ADAU1962), verified with APP_MODE_DIAG_DAC_ID:
@@ -69,9 +71,9 @@ to the terms of the associated Analog Devices License Agreement.
  *   NOTE: Silkscreen says J17 = DAC1/2, J18 = DAC3/4. The DAC frame start is offset by half a
  *         TDM4 frame (2 slots) from SPORT 4A, so DAC1/2 picks up SPORT slots 2/3.
  *         Cause: DAC_CTRL1 defaults (LRCLK_MODE=0 50% duty, LRCLK_POL=0 Left/Odd = LRCLK Low) make the
- *         DAC start its frame on the falling edge, while SPORT / ADC start on the rising edge.
+ *         DAC start its frame on the falling edge, while SPORT starts on the rising edge.
  *         Kept as-is on purpose (DAC_CTRL1 = 0x01); LRCLK_POL=1 (0x21) should align it but is untested.
- *         ADC side is not affected (verified with APP_MODE_DIAG_LINE_IN).
+ *         The ADC shows the same 2-slot offset in 50% duty mode (handled by CMAP above).
  *
  * REW Channel Configuration:
  *   - Output:             R (PC Right -> J16 Ring -> Slot 2 -> Sweep to Speaker)
@@ -85,6 +87,35 @@ to the terms of the associated Analog Devices License Agreement.
 /* Per-slot ADC peak meter, printed from main loop (not from the SPORT callback) */
 #define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
 #define PEAK_METER_CALLBACKS    24000u  /* 192kHz / 16 frames = 12000 callbacks/s -> print every ~2 s */
+
+/* Raw ADC capture: ~1 s after start-up, records ADC_CAPTURE_LEN consecutive samples of one slot into
+ * g_AdcCapture[] and main() writes them to ADC_CAPTURE_FILE over JTAG (decimal + hex per line, for checking
+ * bit patterns). Audio glitches while the file is written. g_AdcCapture can also be viewed in the CCES Plot view. */
+#define ENABLE_ADC_CAPTURE      0
+#define ADC_CAPTURE_SLOT        J16_SWEEP_SLOT  /* J16 Right (PC R) */
+#define ADC_CAPTURE_LEN         4096u           /* 21.3 ms @ 192kHz = 6.4 periods of 300 Hz */
+#define ADC_CAPTURE_FILE        "D:/cindy_hsieh/My Documents/project/ANC/EV-SC598-SOM/Audio_Talkthrough_I2S/adc_capture.txt"
+
+/* Diagnostic: run the codecs at 96 kHz (BCLK 12.288 MHz instead of 24.576 MHz) to check whether the
+ * stair-step ADC samples at 192 kHz are a serial-port timing problem. Only the codec FS registers change;
+ * ANC tuning, cycle budget and timing comments still assume 192 kHz, so use with DIAG modes only. */
+#define TEST_FS_96K             0
+
+/* SPORT 4B (ADC) sampling edge. At 192 kHz TDM4 (BCLK 24.576 MHz) the ADC SDATA line is too slow to fall
+ * within half a BCLK: capture showed runs of 1s spilling into later bits (even bit 7, below the 24-bit word),
+ * clean at 96 kHz. The ADC launches data on the BCLK falling edge; sampling on the next falling edge gives each
+ * bit a full BCLK period to settle. FS is sampled on the same edge, so frame alignment stays consistent. */
+#define SPORT_RX_SAMPLE_FALLING 1
+
+#if TEST_FS_96K
+#define DAC_CTRL0_FS            0x12  /* TDM4 (bits 5:3=010), FS 64-96kHz (bits 2:1=01) */
+#define DAC_CTRL2_OSR           0x04  /* 256x fs OSR (bit 1=0), TDM 32-BCLK slot (bit 4=0), Auto Mute EN (bit 2=1) */
+#define ADC_SAI_CTRL0_FS        0x13  /* TDM4 (bits 5:3=010), FS 64-96kHz (bits 2:0=011) */
+#else
+#define DAC_CTRL0_FS            0x16  /* 192kHz Low Delay Mode (bits 2:1=11), TDM4 mode (bits 5:3=010) */
+#define DAC_CTRL2_OSR           0x06  /* 128x fs OSR (bit 1=1 for 192kHz), TDM 32-BCLK slot (bit 4=0), Auto Mute EN (bit 2=1) */
+#define ADC_SAI_CTRL0_FS        0x14  /* TDM4 (bits 5:3=010), FS 192kHz (bits 2:0=100) */
+#endif
 
 /* Process_Block() cycle meter, printed from main loop every PEAK_METER_CALLBACKS (Release build only;
  * Debug -O0 starves the main loop and nothing prints). Log fields are explained at the printf in main().
@@ -113,7 +144,7 @@ struct Config_Table Config_array_DAC[28] = {
 		   	    {     ADAU1962_PDN_CTRL_3,	    0x0f},
 		   	    {     ADAU1962_DAC_CTRL0,		0x01},
 		   	    {     ADAU1962_DAC_CTRL1,		0x01}, /* Master, LRCLK 50% duty + normal polarity: DAC slot 0 = SPORT slot 2 (see slot mapping NOTE) */
-		   	    {     ADAU1962_DAC_CTRL2,		0x06}, /* 128x fs OSR (bit 1=1 for 192kHz), TDM 32-BCLK slot (bit 4=0), Auto Mute EN (bit 2=1) */
+		   	    {     ADAU1962_DAC_CTRL2,		DAC_CTRL2_OSR},
 		   	    {     ADAU1962_DAC_MUTE1,	    0x0},
 		   	    {     ADAU1962_DAC_MUTE2,	    0x00},
 		   	    {     ADAU1962_MSTR_VOL,		0x00},
@@ -135,7 +166,7 @@ struct Config_Table Config_array_DAC[28] = {
 				{     ADAU1962_DAC_PWR3,		0xaa},
 				{     ADAU1962_PDN_CTRL_2,	    0x00}, /* Power up DAC 1~8 (0x00 = all active in ADAU1962) */
 				{     ADAU1962_PDN_CTRL_3,	    0x00}, /* Power up DAC 9~12 */
-				{     ADAU1962_DAC_CTRL0,		0x16}  /* 192kHz Low Delay Mode (bits 2:1=11), TDM4 mode (bits 5:3=010) */
+				{     ADAU1962_DAC_CTRL0,		DAC_CTRL0_FS}
 
 };
 
@@ -143,11 +174,11 @@ struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_BOOST			,	0x00},
 		 {ADAU1979_REG_MICBIAS			,	0x00},
 		 {ADAU1979_REG_BLOCK_POWER_SAI	,	0x30},
-		 {ADAU1979_REG_SAI_CTRL0		,	0x14}, /* TDM4 (bits 5:3=010), FS 192kHz (bits 2:0=100) */
-		 {ADAU1979_REG_SAI_CTRL1		,	0x08}, /* SDATAOUT1 (bit 7=0), Pulse (bit 3=1), Slave to DAC clock (bit 0=0) */
-		 {ADAU1979_REG_CMAP12			,	0x01},
-		 {ADAU1979_REG_CMAP34			,	0x23},
-		 {ADAU1979_REG_SAI_OVERTEMP		,	0xf0},
+		 {ADAU1979_REG_SAI_CTRL0		,	ADC_SAI_CTRL0_FS},
+		 {ADAU1979_REG_SAI_CTRL1		,	0x00}, /* SDATAOUT1 (bit 7=0), LRCLK 50% duty (bit 3=0, matches DAC master DAC_CTRL1), Slave to DAC clock (bit 0=0) */
+		 {ADAU1979_REG_CMAP12			,	0x23}, /* AIN1 -> ADC slot 3, AIN2 -> ADC slot 2 (+2 slot offset -> SPORT 1 / 0) */
+		 {ADAU1979_REG_CMAP34			,	0x01}, /* AIN3 -> ADC slot 1, AIN4 -> ADC slot 0 (+2 slot offset -> SPORT 3 / 2) */
+		 {ADAU1979_REG_SAI_OVERTEMP		,	0xf0}, /* SDATAOUT drive enable CH1~4 (bits 7:4); on/off only, no drive strength setting */
 		 {ADAU1979_REG_POST_ADC_GAIN1 	,	0xA0},
 		 {ADAU1979_REG_POST_ADC_GAIN2 	,	0xA0},
 		 {ADAU1979_REG_POST_ADC_GAIN3 	,	0xA0},
@@ -255,6 +286,31 @@ static void Update_Slot_Peak(const int *pIn)
 }
 #endif
 
+#if ENABLE_ADC_CAPTURE
+int g_AdcCapture[ADC_CAPTURE_LEN];          /* non-static so the Plot / Expressions views can find it */
+volatile uint32_t g_AdcCaptureIdx = 0;
+volatile uint32_t g_AdcCaptureDone = 0;
+
+static void Update_Adc_Capture(const int *pIn)
+{
+	int i;
+	if (g_AdcCaptureDone)
+	{
+		return;
+	}
+	for(i=0; i<COUNT; i+=4)
+	{
+		g_AdcCapture[g_AdcCaptureIdx++] = pIn[i + ADC_CAPTURE_SLOT];
+		if (g_AdcCaptureIdx >= ADC_CAPTURE_LEN)
+		{
+			g_AdcCaptureIdx = 0;
+			g_AdcCaptureDone = 1;
+			return;
+		}
+	}
+}
+#endif
+
 #if ENABLE_CYCLE_METER
 /* Process_Block() cycles since last print, updated in SPORT callback */
 static volatile uint32_t g_CycleMax = 0;
@@ -346,6 +402,9 @@ static void Process_Block_Body(const int *pIn, int *pOut)
 {
 #if ENABLE_SLOT_PEAK_METER
 	Update_Slot_Peak(pIn);
+#endif
+#if ENABLE_ADC_CAPTURE
+	Update_Adc_Capture(pIn);
 #endif
 #if (APP_MODE == APP_MODE_ANC)
 	ANC_Process_Block(pIn, pOut, COUNT);
@@ -606,7 +665,7 @@ static int Sport_Init(void)
 	/* Configure the data, clock, frame sync and MCTL of SPORT Device 4B (RX: 4 channels on wire, capture 4 channels Slot 0~3) */
 	eResult = adi_sport_ConfigData(hSPORTDev4BRx,ADI_SPORT_DTYPE_SIGN_FILL,31,false,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigData(4B)", eResult);
-	eResult = adi_sport_ConfigClock(hSPORTDev4BRx,32,false,false,false);
+	eResult = adi_sport_ConfigClock(hSPORTDev4BRx,32,false,(SPORT_RX_SAMPLE_FALLING != 0),false);
 	CHECK_SPORT_STEP("adi_sport_ConfigClock(4B)", eResult);
 	eResult = adi_sport_ConfigFrameSync(hSPORTDev4BRx,31,false,false,false,true,false,false);
 	CHECK_SPORT_STEP("adi_sport_ConfigFrameSync(4B)", eResult);
@@ -1047,6 +1106,34 @@ int main(int argc, char *argv[])
 		}
 	}
 #elif (ADI_CONFIG_CONTINUOUS_AUDIO==1)
+#if ENABLE_ADC_CAPTURE
+	/* Skip ~1 s of start-up, take a fresh capture, then write it to the host PC over JTAG
+	 * (one sample per line: decimal and hex). Audio glitches while writing; capture is already done. */
+	{
+		uint32_t t0 = TestCallbackCount;
+		uint32_t n;
+		FILE *fp;
+		while ((uint32_t)(TestCallbackCount - t0) < 12000u) {}
+		g_AdcCaptureIdx = 0;
+		g_AdcCaptureDone = 0;
+		while (!g_AdcCaptureDone) {}
+		fp = fopen(ADC_CAPTURE_FILE, "w");
+		if (fp != NULL)
+		{
+			for(n=0; n<ADC_CAPTURE_LEN; n++)
+			{
+				fprintf(fp, "%d\t0x%08X\n", g_AdcCapture[n], (unsigned int)g_AdcCapture[n]);
+			}
+			fclose(fp);
+			printf("[CAPTURE] wrote %u samples of slot %d to %s\n", ADC_CAPTURE_LEN, ADC_CAPTURE_SLOT, ADC_CAPTURE_FILE);
+		}
+		else
+		{
+			printf("[CAPTURE] fopen failed: %s\n", ADC_CAPTURE_FILE);
+		}
+		fflush(stdout);
+	}
+#endif
 #if ENABLE_SLOT_PEAK_METER || ENABLE_CYCLE_METER
 	{
 		uint32_t lastCount = TestCallbackCount;
