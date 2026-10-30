@@ -75,3 +75,7 @@ feedback_path.h
 
 # Claude Code personal settings
 .claude/settings.local.json
+
+# Raw ADC sample dumps written over JTAG when ENABLE_ADC_CAPTURE = 1 (Audio_Talkthrough_I2S.c),
+# used to check ADC bit patterns (e.g. the 192 kHz bit-error diagnosis)
+adc_capture*.txt
