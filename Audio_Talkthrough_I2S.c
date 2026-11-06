@@ -12,6 +12,7 @@ to the terms of the associated Analog Devices License Agreement.
 #include "adi_initialize.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/adi_core.h>
 #include "adi_initialize.h"
 #include <services/int/adi_int.h>
@@ -102,7 +103,7 @@ to the terms of the associated Analog Devices License Agreement.
 #define ENABLE_ADC_CAPTURE      0
 #define ADC_CAPTURE_SLOT        J16_SWEEP_SLOT  /* J16 Right (PC R) */
 #define ADC_CAPTURE_LEN         4096u           /* 21.3 ms @ 192kHz = 6.4 periods of 300 Hz */
-#define ADC_CAPTURE_FILE        "D:/cindy_hsieh/My Documents/project/ANC/EV-SC598-SOM/Audio_Talkthrough_I2S/adc_capture.txt"
+#define ADC_CAPTURE_FILE        "measurements/adc_capture/adc_capture.txt"  /* in this repo (Host_Path); folder must exist */
 
 /* Diagnostic: run the codecs at 96 kHz (BCLK 12.288 MHz instead of 24.576 MHz) to check whether the
  * stair-step ADC samples at 192 kHz are a serial-port timing problem. Only the codec FS registers change;
@@ -315,6 +316,23 @@ static void Update_Adc_Capture(const int *pIn)
 			return;
 		}
 	}
+}
+#endif
+
+#if ENABLE_ADC_CAPTURE
+/* Host PC path of a repo-relative file written over JTAG: this source file's folder + rel. CCES compiles linked
+ * sources by absolute path, so __FILE__ holds the repo folder of whichever PC built it. */
+static const char *Host_Path(const char *rel)
+{
+	static char path[512];
+	const char *src = __FILE__;
+	size_t n = strlen(src);
+	while (n > 0u && src[n - 1u] != '/' && src[n - 1u] != '\\')
+	{
+		n--;
+	}
+	snprintf(path, sizeof(path), "%.*s%s", (int)n, src, rel);
+	return path;
 }
 #endif
 
@@ -1182,11 +1200,12 @@ int main(int argc, char *argv[])
 		uint32_t t0 = TestCallbackCount;
 		uint32_t n;
 		FILE *fp;
+		const char *path = Host_Path(ADC_CAPTURE_FILE);
 		while ((uint32_t)(TestCallbackCount - t0) < CALLBACKS_PER_S) {}
 		g_AdcCaptureIdx = 0;
 		g_AdcCaptureDone = 0;
 		while (!g_AdcCaptureDone) {}
-		fp = fopen(ADC_CAPTURE_FILE, "w");
+		fp = fopen(path, "w");
 		if (fp != NULL)
 		{
 			for(n=0; n<ADC_CAPTURE_LEN; n++)
@@ -1194,11 +1213,11 @@ int main(int argc, char *argv[])
 				fprintf(fp, "%d\t0x%08X\n", g_AdcCapture[n], (unsigned int)g_AdcCapture[n]);
 			}
 			fclose(fp);
-			printf("[CAPTURE] wrote %u samples of slot %d to %s\n", ADC_CAPTURE_LEN, ADC_CAPTURE_SLOT, ADC_CAPTURE_FILE);
+			printf("[CAPTURE] wrote %u samples of slot %d to %s\n", ADC_CAPTURE_LEN, ADC_CAPTURE_SLOT, path);
 		}
 		else
 		{
-			printf("[CAPTURE] fopen failed: %s\n", ADC_CAPTURE_FILE);
+			printf("[CAPTURE] fopen failed: %s\n", path);
 		}
 		fflush(stdout);
 	}
