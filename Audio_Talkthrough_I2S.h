@@ -51,7 +51,9 @@ to the terms of the associated Analog Devices License Agreement.
 #define SPORT_4A_SPU  					71
 #define SPORT_4B_SPU   					72
 
-#define DMA_NUM_DESC 				2u
+/* Descriptors per DMA ring. The two buffers alternate, so 2 would do; 4 lets the DMA probe
+ * (ENABLE_DMA_PROBE) tell four consecutive blocks apart. */
+#define DMA_NUM_DESC 				4u
 
 #define SUCCESS   0
 #define FAILED   -1

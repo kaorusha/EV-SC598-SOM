@@ -133,10 +133,24 @@ to the terms of the associated Analog Devices License Agreement.
  *   period ~= budget       -> real time
  *   period ~= avg + ~1.4k  -> CPU saturated, DMA blocks dropped (avg excludes callback overhead)
  * Ignore the first print: blocks count from boot, the elapsed stamp starts in main loop.
+ * The hard limit is below the budget: the TX DMA fetches block k+2 16.2k cycles (78% of the block) after the callback
+ * entry for RX block k (DMA probe, 2026-11-06), so Process_Block must be done by then; keep max under about 75%.
  */
 #define ENABLE_CYCLE_METER      0
 #define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
 #define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * (float)BLOCK_FRAMES / 192000.0f)  /* 4 frames @ 192kHz = 20.8 us */
+
+/* DMA timing probe (diagnostic, any APP_MODE). Records the TX (SPORT 4A = DMA10) and RX (SPORT 4B = DMA11) DMA positions:
+ *   - start-up trace, logged on every change: from the TX DMA submit (SPORTs still off) until the first RX blocks are in.
+ *     Shows how many words the TX DMA prefetches and when each SPORT starts.
+ *   - DMA_PROBE_LEN consecutive RX callbacks ~0.5 s after start-up, at entry and after Process_Block, plus how long
+ *     until the TX DMA fetches its next block (the write deadline; the probe busy-waits for it, up to 17 us).
+ *     Shows how far ahead the TX DMA reads and whether the buffer pair matches the RX DMA position.
+ * main() then appends both to DMA_PROBE_FILE over JTAG (one audio glitch) and prints a summary line. */
+#define ENABLE_DMA_PROBE        0
+#define DMA_PROBE_LEN           64u
+#define DMA_PROBE_TRACE_LEN     256u
+#define DMA_PROBE_FILE          "measurements/dma_probe/dma_probe.txt"      /* in this repo (Host_Path); folder must exist */
 
 struct Config_Table
 {
@@ -319,7 +333,7 @@ static void Update_Adc_Capture(const int *pIn)
 }
 #endif
 
-#if ENABLE_ADC_CAPTURE
+#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE
 /* Host PC path of a repo-relative file written over JTAG: this source file's folder + rel. CCES compiles linked
  * sources by absolute path, so __FILE__ holds the repo folder of whichever PC built it. */
 static const char *Host_Path(const char *rel)
@@ -481,6 +495,153 @@ static void Process_Block_Body(const int *pIn, int *pOut)
 #endif
 }
 
+#if ENABLE_DMA_PROBE
+#define PROBE_RD(reg)   ((uint32_t)(uintptr_t)*(reg))   /* DMA MMR as a 32-bit value (system byte address for ADDR/DSCPTR) */
+
+/* Start-up trace entry, logged whenever a DMA position changes */
+typedef struct
+{
+	uint32_t t;          /* EMUCLK cycles since the trace started */
+	uint32_t stage;      /* 1: TX DMA submitted, SPORTs off; 2: both SPORTs enabled */
+	uint32_t txa, txn;   /* TX DMA ADDR_CUR, DSCPTR_NXT */
+	uint32_t rxa, rxn;   /* RX DMA ADDR_CUR, DSCPTR_NXT */
+} DMA_Probe_Trace_Rec;
+
+/* One RX callback: DMA positions at entry and after Process_Block */
+typedef struct
+{
+	uint32_t t0, t1;            /* EMUCLK at entry / after Process_Block */
+	uint32_t rxa0, rxn0;        /* RX DMA ADDR_CUR, DSCPTR_NXT at entry */
+	uint32_t txa0, txn0, txs0;  /* TX DMA ADDR_CUR, DSCPTR_NXT, STAT (FIFOFILL = bits 18:16) at entry */
+	uint32_t txa1, txn1;        /* TX DMA ADDR_CUR, DSCPTR_NXT after Process_Block */
+	uint32_t count;             /* buffer pair processed: 1 = Buffer4 -> Buffer1, 2 = Buffer5 -> Buffer2 */
+	uint32_t tsw;               /* EMUCLK from entry until the TX DMA moves to its next block (write deadline), max 17 us */
+} DMA_Probe_Rec;
+
+static DMA_Probe_Trace_Rec g_ProbeTrace[DMA_PROBE_TRACE_LEN];
+static uint32_t g_ProbeTraceN = 0;
+static uint32_t g_ProbeTraceT0;
+static DMA_Probe_Rec g_Probe[DMA_PROBE_LEN];
+static volatile uint32_t g_ProbeIdx = 0;
+static volatile uint32_t g_ProbeArmed = 0;   /* set by main() once start-up printing is over */
+
+/* Poll both DMAs for `cycles` core cycles and log every change of position */
+static void Dma_Probe_Trace(uint32_t stage, uint32_t cycles)
+{
+	cycle_t start, now;
+	DMA_Probe_Trace_Rec r, last;
+	START_CYCLE_COUNT(start);
+	if (stage == 1u)
+	{
+		g_ProbeTraceT0 = (uint32_t)start;
+	}
+	last.txa = last.txn = last.rxa = last.rxn = 0xFFFFFFFFu;  /* log the first reading */
+	do
+	{
+		r.txa = PROBE_RD(pREG_DMA10_ADDR_CUR);
+		r.txn = PROBE_RD(pREG_DMA10_DSCPTR_NXT);
+		r.rxa = PROBE_RD(pREG_DMA11_ADDR_CUR);
+		r.rxn = PROBE_RD(pREG_DMA11_DSCPTR_NXT);
+		START_CYCLE_COUNT(now);
+		if ((r.txa != last.txa || r.txn != last.txn || r.rxa != last.rxa || r.rxn != last.rxn)
+			&& g_ProbeTraceN < DMA_PROBE_TRACE_LEN)
+		{
+			r.t = (uint32_t)now - g_ProbeTraceT0;
+			r.stage = stage;
+			g_ProbeTrace[g_ProbeTraceN++] = r;
+			last = r;
+		}
+	} while ((uint32_t)now - (uint32_t)start < cycles);
+}
+
+/* Word position (0 .. 4*COUNT-1) of a DMA in its 4-descriptor ring, from DSCPTR_NXT (= the next descriptor, so the
+ * current one is the one before it) and ADDR_CUR; -1 if the pointers match no descriptor */
+static int Dma_Ring_Pos(const ADI_PDMA_DESC_LIST *ring, uint32_t nxt, uint32_t addr)
+{
+	uint32_t i;
+	for (i = 0u; i < DMA_NUM_DESC; i++)
+	{
+		if ((uint32_t)(uintptr_t)ring[i].pNxtDscp == nxt)
+		{
+			return (int)(i * COUNT + (addr - (uint32_t)(uintptr_t)ring[i].pStartAddr) / 4u);
+		}
+	}
+	return -1;
+}
+
+/* Append the trace and the callback records to DMA_PROBE_FILE and print the TX lead (TX DMA read position minus
+ * RX DMA write position, in words, mod one ring = 4 blocks) at callback entry and after Process_Block */
+static void Dma_Probe_Write(void)
+{
+	FILE *fp;
+	const char *path = Host_Path(DMA_PROBE_FILE);
+	uint32_t i;
+	int lead0Min = 1 << 30, lead0Max = -(1 << 30), lead1Min = 1 << 30, lead1Max = -(1 << 30), mismatch = 0;
+	uint32_t tswMin = 0xFFFFFFFFu, tswMax = 0u;
+	const int ring = (int)(DMA_NUM_DESC * COUNT);
+
+	for (i = 0u; i < DMA_PROBE_LEN; i++)
+	{
+		const DMA_Probe_Rec *p = &g_Probe[i];
+		int rx = Dma_Ring_Pos(iSRC_LIST_SP4B, p->rxn0, p->rxa0);
+		int tx0 = Dma_Ring_Pos(iDESC_LIST_SP4A, p->txn0, p->txa0);
+		int tx1 = Dma_Ring_Pos(iDESC_LIST_SP4A, p->txn1, p->txa1);
+		int l0, l1;
+		if (rx < 0 || tx0 < 0 || tx1 < 0)
+		{
+			continue;
+		}
+		l0 = ((tx0 - rx) % ring + ring) % ring;
+		l1 = ((tx1 - rx) % ring + ring) % ring;
+		if (l0 < lead0Min) lead0Min = l0;
+		if (l0 > lead0Max) lead0Max = l0;
+		if (l1 < lead1Min) lead1Min = l1;
+		if (l1 > lead1Max) lead1Max = l1;
+		/* the RX DMA is in block rx / COUNT, so the block just finished is the other buffer */
+		if ((uint32_t)((rx / COUNT + 1) % 2) != p->count - 1u)
+		{
+			mismatch++;
+		}
+		if (p->tsw < tswMin) tswMin = p->tsw;
+		if (p->tsw > tswMax) tswMax = p->tsw;
+	}
+
+	fp = fopen(path, "a");
+	if (fp != NULL)
+	{
+		fprintf(fp, "# run: APP_MODE %d, COUNT %d, DMA_NUM_DESC %u, EMUCLK cycles\n", APP_MODE, COUNT, (unsigned)DMA_NUM_DESC);
+		for (i = 0u; i < DMA_NUM_DESC; i++)
+		{
+			fprintf(fp, "D tx %u 0x%08X 0x%08X 0x%08X\n", (unsigned)i, (unsigned)(uintptr_t)iDESC_LIST_SP4A[i].pStartAddr,
+					(unsigned)(uintptr_t)iDESC_LIST_SP4A[i].pNxtDscp, (unsigned)iDESC_LIST_SP4A[i].Config);
+			fprintf(fp, "D rx %u 0x%08X 0x%08X 0x%08X\n", (unsigned)i, (unsigned)(uintptr_t)iSRC_LIST_SP4B[i].pStartAddr,
+					(unsigned)(uintptr_t)iSRC_LIST_SP4B[i].pNxtDscp, (unsigned)iSRC_LIST_SP4B[i].Config);
+		}
+		for (i = 0u; i < g_ProbeTraceN; i++)
+		{
+			const DMA_Probe_Trace_Rec *r = &g_ProbeTrace[i];
+			fprintf(fp, "T %u %u 0x%08X 0x%08X 0x%08X 0x%08X\n", (unsigned)r->stage, (unsigned)r->t,
+					(unsigned)r->txa, (unsigned)r->txn, (unsigned)r->rxa, (unsigned)r->rxn);
+		}
+		for (i = 0u; i < DMA_PROBE_LEN; i++)
+		{
+			const DMA_Probe_Rec *p = &g_Probe[i];
+			fprintf(fp, "C %u %u %u 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X 0x%08X %u %u\n", (unsigned)i,
+					(unsigned)p->t0, (unsigned)(p->t1 - p->t0), (unsigned)p->rxa0, (unsigned)p->rxn0,
+					(unsigned)p->txa0, (unsigned)p->txn0, (unsigned)p->txs0, (unsigned)p->txa1, (unsigned)p->txn1,
+					(unsigned)p->count, (unsigned)p->tsw);
+		}
+		fclose(fp);
+	}
+	printf("[DMA PROBE] %s %s: %u trace entries, %u callbacks; TX lead at entry %d..%d words, after Process_Block %d..%d "
+		   "(mod %d); buffer mismatches %d; TX DMA next block %u..%u cycles after entry\n",
+		   (fp != NULL) ? "appended to" : "FAILED to open", path, (unsigned)g_ProbeTraceN,
+		   (unsigned)DMA_PROBE_LEN, lead0Min, lead0Max, lead1Min, lead1Max, ring, mismatch, (unsigned)tswMin,
+		   (unsigned)tswMax);
+	fflush(stdout);
+}
+#endif
+
 
 static void SPORTCallback(
     void        *pAppHandle,
@@ -505,6 +666,22 @@ static void SPORTCallback(
         		int done4 = ((rxCur - g_RxBuf5Sys) < 4u * COUNT) || (rxCur == g_RxBuf4Sys + 4u * COUNT);
 
         		TestCallbackCount +=1;
+#if ENABLE_DMA_PROBE
+        		uint32_t probeIdx = g_ProbeIdx;
+        		DMA_Probe_Rec *pr = (g_ProbeArmed && probeIdx < DMA_PROBE_LEN) ? &g_Probe[probeIdx] : NULL;
+        		if (pr != NULL)
+        		{
+        			cycle_t t;
+        			START_CYCLE_COUNT(t);
+        			pr->t0   = (uint32_t)t;
+        			pr->rxa0 = rxCur;
+        			pr->rxn0 = PROBE_RD(pREG_DMA11_DSCPTR_NXT);
+        			pr->txa0 = PROBE_RD(pREG_DMA10_ADDR_CUR);
+        			pr->txn0 = PROBE_RD(pREG_DMA10_DSCPTR_NXT);
+        			pr->txs0 = *pREG_DMA10_STAT;
+        			pr->count = done4 ? 1u : 2u;
+        		}
+#endif
 
         		if (done4)
         		{
@@ -514,6 +691,22 @@ static void SPORTCallback(
 				{
 				   Process_Block(int_SP0ABuffer5, int_SP0ABuffer2);
 				}
+#if ENABLE_DMA_PROBE
+        		if (pr != NULL)
+        		{
+        			cycle_t t;
+        			pr->txa1 = PROBE_RD(pREG_DMA10_ADDR_CUR);
+        			pr->txn1 = PROBE_RD(pREG_DMA10_DSCPTR_NXT);
+        			START_CYCLE_COUNT(t);
+        			pr->t1 = (uint32_t)t;
+        			do
+        			{
+        				START_CYCLE_COUNT(t);
+        			} while (PROBE_RD(pREG_DMA10_DSCPTR_NXT) == pr->txn1 && (uint32_t)t - pr->t0 < 17000u);
+        			pr->tsw = (uint32_t)t - pr->t0;
+        			g_ProbeIdx = probeIdx + 1u;
+        		}
+#endif
         	}
 
         		break;
@@ -759,6 +952,9 @@ static int Sport_Init(void)
 	/* Submit the first buffer for Tx.  */
 	eResult = adi_sport_DMATransfer(hSPORTDev4ATx,&iDESC_LIST_SP4A[0],(DMA_NUM_DESC),ADI_PDMA_DESCRIPTOR_LIST, ADI_SPORT_CHANNEL_PRIM);
 	CHECK_SPORT_STEP("adi_sport_DMATransfer(4A Tx)", eResult);
+#if ENABLE_DMA_PROBE
+	Dma_Probe_Trace(1u, 5000u);    /* 5 us: TX DMA prefetch with both SPORTs still off */
+#endif
 
 	/* Start both SPORTs on the same frame, so S and F keep the same delay from boot to boot. Enabled back to back at a
 	 * random moment, the TX could start one frame (5.2 us) after the RX: an FS edge between the two enables, or a TX
@@ -783,6 +979,9 @@ static int Sport_Init(void)
 				   txReady, synced);
 		}
 	}
+#if ENABLE_DMA_PROBE
+	Dma_Probe_Trace(2u, 60000u);   /* 60 us: first frames of both SPORTs (RX callbacks may interrupt the polling) */
+#endif
 
 	printf("  [OK] SPORT 4A TX & 4B RX configured and enabled on the same frame\n");
 	fflush(stdout);
@@ -1193,6 +1392,18 @@ int main(int argc, char *argv[])
 		}
 	}
 #elif (ADI_CONFIG_CONTINUOUS_AUDIO==1)
+#if ENABLE_DMA_PROBE
+	/* Let ~0.5 s pass after the last start-up printf (JTAG I/O halts the core), record DMA_PROBE_LEN callbacks, then
+	 * write them to the host PC over JTAG */
+	{
+		uint32_t t0 = TestCallbackCount;
+		while ((uint32_t)(TestCallbackCount - t0) < CALLBACKS_PER_S / 2u) {}
+		g_ProbeArmed = 1u;
+		while (g_ProbeIdx < DMA_PROBE_LEN) {}
+		g_ProbeArmed = 0u;
+		Dma_Probe_Write();
+	}
+#endif
 #if ENABLE_ADC_CAPTURE
 	/* Skip ~1 s of start-up, take a fresh capture, then write it to the host PC over JTAG
 	 * (one sample per line: decimal and hex). Audio glitches while writing; capture is already done. */
