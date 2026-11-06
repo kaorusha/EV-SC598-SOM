@@ -31,10 +31,11 @@ to the terms of the associated Analog Devices License Agreement.
  * Application Mode (single switch):
  *   APP_MODE_ANC          : FxNLMS ANC, 48 kHz core between 192 kHz codec samples (anc_rate.h).
  *                           J18 Right = anti-noise y(n), J4/J17 = Error / Ref Mic monitor.
- *   APP_MODE_PATH_MEASURE : REW bridge for secondary / feedback path measurement.
- *                           J16 Left = REW timing reference (chirp), J16 Right = REW sweep.
+ *   APP_MODE_PATH_MEASURE : Bridge for tools/pathmeas.py (secondary / feedback path), routed through the same
+ *                           192 <-> 48 kHz boundary as the ANC core, so it measures the core-domain path.
+ *                           J16 Left = timing reference sweeps, J16 Right = sweep.
  *                           J18 Right = sweep to speaker (Left muted).
- *                           J17 Left  = Error Mic + chirp (secondary path), J17 Right = Ref Mic + chirp (feedback path).
+ *                           J17 Left  = Error Mic + reference (secondary path), J17 Right = Ref Mic + reference (feedback path).
  *   APP_MODE_DIAG_MIC     : Mic passthrough, no ANC. J18 Right = Ref Mic, J4/J17 = Error / Ref Mic.
  *   APP_MODE_DIAG_LINE_IN : J16 Left/Right -> J18 and J4/J17 Left/Right (check PC line-in, use with slot peak meter).
  *   APP_MODE_DIAG_DAC_ID  : DAC slot s beeps (s+1) times every 2 s, no input (check slot -> jack/ear wiring).
@@ -75,14 +76,14 @@ to the terms of the associated Analog Devices License Agreement.
  *         Kept as-is on purpose (DAC_CTRL1 = 0x01); LRCLK_POL=1 (0x21) should align it but is untested.
  *         The ADC shows the same 2-slot offset in 50% duty mode (handled by CMAP above).
  *
- * REW Channel Configuration:
+ * PC channel configuration (tools/pathmeas.py; REW used the same channels):
  *   - Output:             R (PC Right -> J16 Ring -> Slot 2 -> Sweep to Speaker)
- *   - Timing ref output:  L (PC Left  -> J16 Tip  -> Slot 3 -> Chirp to J17)
+ *   - Timing ref output:  L (PC Left  -> J16 Tip  -> Slot 3 -> Reference to J17)
  */
 #define J12_ERR_MIC_SLOT        0   /* Error Mic (enclosure outlet) */
 #define J12_REF_MIC_SLOT        1   /* Ref Mic (next to fan) */
-#define J16_SWEEP_SLOT          2   /* J16 AIN4 (PC Right = REW Sweep) */
-#define J16_CHIRP_SLOT          3   /* J16 AIN3 (PC Left  = REW Timing Reference) */
+#define J16_SWEEP_SLOT          2   /* J16 AIN4 (PC Right = Sweep) */
+#define J16_CHIRP_SLOT          3   /* J16 AIN3 (PC Left  = Timing Reference) */
 
 #if (COUNT % (4 * ANC_DECIM)) != 0
 #error "COUNT must hold whole 48 kHz core samples (4 * ANC_DECIM ints)"
@@ -91,7 +92,7 @@ to the terms of the associated Analog Devices License Agreement.
 #define CALLBACKS_PER_S         (192000u / BLOCK_FRAMES)   /* 48000 with 4-frame blocks */
 
 /* Per-slot ADC peak meter, printed from main loop (not from the SPORT callback) */
-#define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
+#define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during sweeps */
 #define PEAK_METER_CALLBACKS    (2u * CALLBACKS_PER_S)  /* print every ~2 s */
 
 /* Raw ADC capture: ~1 s after start-up, records ADC_CAPTURE_LEN consecutive samples of one slot into
@@ -370,18 +371,39 @@ static inline int Saturate_To_Int(float x)
 	return (int)x;
 }
 
-/* REW path measurement bridge */
+/* Path measurement bridge for tools/pathmeas.py, through the ANC core's 192 <-> 48 kHz boundary (anc_rate.h):
+ * every input is decimated and every output interpolated exactly as in ANC_Process_Block, and the 48 kHz samples
+ * are taken at the same frame of each block. The reference passes the same boundary, so the measured path runs from
+ * a core output sample to a core Err (or Ref) sample, rate filters and DMA timing included, and
+ * tools/export_paths.py writes it to second_path.h / feedback_path.h without conversion. */
+static ANC_Rate_State g_PmDec[4];   /* Err, Ref, sweep (J16 R), timing reference (J16 L) */
+static ANC_Rate_State g_PmInt[3];   /* J18 R, J17 L, J17 R */
+
 static void Path_Measure_Process_Block(const int *pIn, int *pOut)
 {
-	int i;
-	for(i=0; i<COUNT; i+=4)
+	int i, k;
+	for(i=0; i<COUNT; i+=4*ANC_DECIM)
 	{
-		float chirp = (float)pIn[i + J16_CHIRP_SLOT] * CALIBRATION_CHIRP_GAIN;
-
-		pOut[i+0] = 0;                                                          /* J18 Left  (Tip):  Mute */
-		pOut[i+1] = pIn[i + J16_SWEEP_SLOT] * CALIBRATION_SWEEP_GAIN;           /* J18 Right (Ring): Sweep to Speaker */
-		pOut[i+2] = Saturate_To_Int((float)pIn[i + J12_ERR_MIC_SLOT] + chirp);  /* J17 Left  (Tip):  Sec Path (Err + Chirp) */
-		pOut[i+3] = Saturate_To_Int((float)pIn[i + J12_REF_MIC_SLOT] + chirp);  /* J17 Right (Ring): FB Path (Ref + Chirp) */
+		float err = 0.0f, ref = 0.0f, sweep = 0.0f, chirp = 0.0f;
+		for(k=0; k<ANC_DECIM; k++)
+		{
+			const int *pf = &pIn[i + 4*k];
+			err   = anc_rate_filter(&g_PmDec[0], (float)pf[J12_ERR_MIC_SLOT]);
+			ref   = anc_rate_filter(&g_PmDec[1], (float)pf[J12_REF_MIC_SLOT]);
+			sweep = anc_rate_filter(&g_PmDec[2], (float)pf[J16_SWEEP_SLOT]);
+			chirp = anc_rate_filter(&g_PmDec[3], (float)pf[J16_CHIRP_SLOT]);
+		}
+		sweep *= (float)CALIBRATION_SWEEP_GAIN;
+		chirp *= CALIBRATION_CHIRP_GAIN;
+		for(k=0; k<ANC_DECIM; k++)
+		{
+			float z = (k == 0) ? (float)ANC_DECIM : 0.0f;   /* zero-stuffing; x ANC_DECIM restores the level */
+			int *pt = &pOut[i + 4*k];
+			pt[0] = 0;                                                                 /* J18 Left  (Tip):  Mute */
+			pt[1] = Saturate_To_Int(anc_rate_filter(&g_PmInt[0], z * sweep));          /* J18 Right (Ring): Sweep to Speaker */
+			pt[2] = Saturate_To_Int(anc_rate_filter(&g_PmInt[1], z * (err + chirp)));  /* J17 Left  (Tip):  Sec Path (Err + Ref) */
+			pt[3] = Saturate_To_Int(anc_rate_filter(&g_PmInt[2], z * (ref + chirp)));  /* J17 Right (Ring): FB Path (Ref + Ref) */
+		}
 	}
 }
 #endif
@@ -1052,14 +1074,12 @@ int main(int argc, char *argv[])
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
-		printf(">>> MODE: REW Path Measurement Bridge (2-Step Timing & High-SNR Sweeps)\n");
+		printf(">>> MODE: Path Measurement Bridge for tools/pathmeas.py (through the 48 kHz core boundary)\n");
 		printf(">>> Input Jack J12:  Slot %d = Ref Mic, Slot %d = Error Mic\n", J12_REF_MIC_SLOT, J12_ERR_MIC_SLOT);
-		printf(">>> Input Jack J16:  Slot %d = REW Sweep (R), Slot %d = REW Timing Ref (L)\n", J16_SWEEP_SLOT, J16_CHIRP_SLOT);
+		printf(">>> Input Jack J16:  Slot %d = Sweep (R), Slot %d = Timing Ref (L)\n", J16_SWEEP_SLOT, J16_CHIRP_SLOT);
 		printf(">>> Output Jack J18: Left = Mute, Right = Sweep to Speaker Amp (Gain = %dx)\n", CALIBRATION_SWEEP_GAIN);
-		printf(">>> Output Jack J17: Left (Tip) = Err + Chirp, Right (Ring) = Ref + Chirp (Chirp Gain = %.4fx)\n", CALIBRATION_CHIRP_GAIN);
-		printf(">>> REW SETTINGS:\n");
-		printf(">>>   - Output:             R (Sweep to Speaker)\n");
-		printf(">>>   - Timing ref output:  L (Chirp mixed into J17)\n");
+		printf(">>> Output Jack J17: Left (Tip) = Err + Ref, Right (Ring) = Ref Mic + Ref (Ref Gain = %.4fx)\n", CALIBRATION_CHIRP_GAIN);
+		printf(">>> PC: pathmeas.py measure --path S with J17 Left in the US205 mic input, --path F with J17 Right\n");
 #elif (APP_MODE == APP_MODE_DIAG_MIC)
 		printf(">>> MODE: DIAG Mic Passthrough\n");
 		printf(">>> Output Jack J18:    Left = Mute, Right = Ref Mic\n");
