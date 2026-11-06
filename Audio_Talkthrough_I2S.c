@@ -18,6 +18,7 @@ to the terms of the associated Analog Devices License Agreement.
 #include <drivers/sport/adi_sport.h>
 #include <services/spu/adi_spu.h>
 #include <drivers/twi/adi_twi.h>
+#include <adi_osal.h>
 #include "ADAU_1962Common.h"
 #include "ADAU_1979Common.h"
 #include "math.h"
@@ -236,19 +237,18 @@ __attribute__((section(".l2_uncached")))
 #endif
 ADI_CACHE_ALIGN static int   int_SP0ABuffer5[COUNT];
 
-/* Destination Sport PDMA list */
-ADI_PDMA_DESC_LIST iDESC_LIST_1_SP4A;
-ADI_PDMA_DESC_LIST iDESC_LIST_2_SP4A;
+/* Destination Sport PDMA ring (TX): int_SP0ABuffer1, int_SP0ABuffer2, int_SP0ABuffer1, ... */
+ADI_PDMA_DESC_LIST iDESC_LIST_SP4A[DMA_NUM_DESC];
 
-/* Source Sport PDMA list */
-ADI_PDMA_DESC_LIST iSRC_LIST_1_SP4B;
-ADI_PDMA_DESC_LIST iSRC_LIST_2_SP4B;
+/* Source Sport PDMA ring (RX): int_SP0ABuffer4, int_SP0ABuffer5, int_SP0ABuffer4, ... */
+ADI_PDMA_DESC_LIST iSRC_LIST_SP4B[DMA_NUM_DESC];
 
 
-/* Count to track the number of callBacks for SPORT transfer */
-volatile uint8_t CallbackCount = 0;
-
+/* Count of RX callbacks (start-up timing in main) */
 volatile uint32_t TestCallbackCount = 0;
+
+/* System byte addresses of int_SP0ABuffer4 / int_SP0ABuffer5 as the RX DMA uses them (set in Sport_Init) */
+static uint32_t g_RxBuf4Sys, g_RxBuf5Sys;
 
 /* Memory required for SPORT */
 static uint8_t SPORTMemory4A[ADI_SPORT_MEMORY_SIZE];
@@ -475,20 +475,28 @@ static void SPORTCallback(
     {
         /* CASE (buffer processed) */
         case ADI_SPORT_EVENT_RX_BUFFER_PROCESSED:
-        		TestCallbackCount +=1;
-        		CallbackCount +=1;
+        	{
+        		/* The finished RX buffer is read off the RX DMA's current address, not counted. Counting callbacks broke
+        		 * whenever the core was halted (every JTAG printf or file write): a halt spanning an even number of blocks
+        		 * swapped the pair for the rest of the run, so the block still being filled was processed and the output
+        		 * went to the buffer the TX DMA had already fetched, 2 blocks (8 frames, 42 us) late (DMA probe, 2026-11-06).
+        		 * Here the RX DMA is at most a word into the next buffer, or parked at the end of the finished one
+        		 * (Buffer4 + 4*COUNT bytes is also where Buffer5 starts when the two are adjacent). Buffer k's output goes
+        		 * to the TX buffer of the same parity, which the TX DMA fetches for block k+2 about 16.7 us from now. */
+        		uint32_t rxCur = (uint32_t)(uintptr_t)*pREG_DMA11_ADDR_CUR;
+        		int done4 = ((rxCur - g_RxBuf5Sys) < 4u * COUNT) || (rxCur == g_RxBuf4Sys + 4u * COUNT);
 
-        		if(CallbackCount==1)
+        		TestCallbackCount +=1;
+
+        		if (done4)
         		{
         		   Process_Block(int_SP0ABuffer4, int_SP0ABuffer1);
         		}
-
-        		if(CallbackCount==2)
+        		else
 				{
 				   Process_Block(int_SP0ABuffer5, int_SP0ABuffer2);
-				   CallbackCount=0;
 				}
-
+        	}
 
         		break;
         default:
@@ -600,60 +608,75 @@ void SRU_Init(void)
 
 }
 
+/* Circular rings of DMA_NUM_DESC descriptors; consecutive descriptors alternate between the two buffers, so the
+ * ping-pong order is the same as with a 2-descriptor ring */
 static void PrepareDescriptors (void)
 {
-#if defined(__ADSPCORTEXA55__)
-	iDESC_LIST_1_SP4A.pStartAddr	= (uint32_t)(uintptr_t)(int *)int_SP0ABuffer1;
-	iDESC_LIST_1_SP4A.pNxtDscp		= (uint32_t)(uintptr_t)&iDESC_LIST_2_SP4A;
-#else
-	iDESC_LIST_1_SP4A.pStartAddr	= (int *)int_SP0ABuffer1;
-	iDESC_LIST_1_SP4A.pNxtDscp		= &iDESC_LIST_2_SP4A;
-#endif
-	iDESC_LIST_1_SP4A.Config		= ENUM_DMA_CFG_XCNT_INT ;
-	iDESC_LIST_1_SP4A.XCount		= COUNT;
-	iDESC_LIST_1_SP4A.XModify		= 4;
-	iDESC_LIST_1_SP4A.YCount		= 0;
-	iDESC_LIST_1_SP4A.YModify		= 0;
+	int *pTx[2] = {int_SP0ABuffer1, int_SP0ABuffer2};
+	int *pRx[2] = {int_SP0ABuffer4, int_SP0ABuffer5};
+	uint32_t i;
 
+	for (i = 0u; i < DMA_NUM_DESC; i++)
+	{
+		uint32_t next = (i + 1u) % DMA_NUM_DESC;
 #if defined(__ADSPCORTEXA55__)
-	iDESC_LIST_2_SP4A.pStartAddr	= (uint32_t)(uintptr_t)(int *)int_SP0ABuffer2;
-	iDESC_LIST_2_SP4A.pNxtDscp		= (uint32_t)(uintptr_t)&iDESC_LIST_1_SP4A;
+		iDESC_LIST_SP4A[i].pStartAddr	= (uint32_t)(uintptr_t)pTx[i % 2u];
+		iDESC_LIST_SP4A[i].pNxtDscp		= (uint32_t)(uintptr_t)&iDESC_LIST_SP4A[next];
+		iSRC_LIST_SP4B[i].pStartAddr	= (uint32_t)(uintptr_t)pRx[i % 2u];
+		iSRC_LIST_SP4B[i].pNxtDscp		= (uint32_t)(uintptr_t)&iSRC_LIST_SP4B[next];
 #else
-	iDESC_LIST_2_SP4A.pStartAddr	= (int *)int_SP0ABuffer2;
-	iDESC_LIST_2_SP4A.pNxtDscp		= &iDESC_LIST_1_SP4A;
+		iDESC_LIST_SP4A[i].pStartAddr	= pTx[i % 2u];
+		iDESC_LIST_SP4A[i].pNxtDscp		= &iDESC_LIST_SP4A[next];
+		iSRC_LIST_SP4B[i].pStartAddr	= pRx[i % 2u];
+		iSRC_LIST_SP4B[i].pNxtDscp		= &iSRC_LIST_SP4B[next];
 #endif
-	iDESC_LIST_2_SP4A.Config		= ENUM_DMA_CFG_XCNT_INT ;
-	iDESC_LIST_2_SP4A.XCount		= COUNT;
-	iDESC_LIST_2_SP4A.XModify		= 4;
-	iDESC_LIST_2_SP4A.YCount		= 0;
-	iDESC_LIST_2_SP4A.YModify		= 0;
+		iDESC_LIST_SP4A[i].Config		= ENUM_DMA_CFG_XCNT_INT;
+		iDESC_LIST_SP4A[i].XCount		= COUNT;
+		iDESC_LIST_SP4A[i].XModify		= 4;
+		iDESC_LIST_SP4A[i].YCount		= 0;
+		iDESC_LIST_SP4A[i].YModify		= 0;
 
-#if defined(__ADSPCORTEXA55__)
-	iSRC_LIST_1_SP4B.pStartAddr		= (uint32_t)(uintptr_t)(int *)int_SP0ABuffer4;
-	iSRC_LIST_1_SP4B.pNxtDscp		= (uint32_t)(uintptr_t)&iSRC_LIST_2_SP4B;
-#else
-	iSRC_LIST_1_SP4B.pStartAddr		=(int *)int_SP0ABuffer4;
-	iSRC_LIST_1_SP4B.pNxtDscp		= &iSRC_LIST_2_SP4B;
-#endif
-	iSRC_LIST_1_SP4B.Config			= ENUM_DMA_CFG_XCNT_INT ;
-	iSRC_LIST_1_SP4B.XCount			= COUNT;
-	iSRC_LIST_1_SP4B.XModify		= 4;
-	iSRC_LIST_1_SP4B.YCount			= 0;
-	iSRC_LIST_1_SP4B.YModify		= 0;
+		iSRC_LIST_SP4B[i].Config		= ENUM_DMA_CFG_XCNT_INT;
+		iSRC_LIST_SP4B[i].XCount		= COUNT;
+		iSRC_LIST_SP4B[i].XModify		= 4;
+		iSRC_LIST_SP4B[i].YCount		= 0;
+		iSRC_LIST_SP4B[i].YModify		= 0;
+	}
+}
 
-#if defined(__ADSPCORTEXA55__)
-	iSRC_LIST_2_SP4B.pStartAddr		= (uint32_t)(uintptr_t)(int *)int_SP0ABuffer5;
-	iSRC_LIST_2_SP4B.pNxtDscp		= (uint32_t)(uintptr_t)&iSRC_LIST_1_SP4B;
-#else
-	iSRC_LIST_2_SP4B.pStartAddr		=(int *)int_SP0ABuffer5;
-	iSRC_LIST_2_SP4B.pNxtDscp		= &iSRC_LIST_1_SP4B;
-#endif
-	iSRC_LIST_2_SP4B.Config			= ENUM_DMA_CFG_XCNT_INT;
-	iSRC_LIST_2_SP4B.XCount			= COUNT;
-	iSRC_LIST_2_SP4B.XModify		= 4;
-	iSRC_LIST_2_SP4B.YCount			= 0;
-	iSRC_LIST_2_SP4B.YModify		= 0;
+/* Busy-waits until the TX DMA has fetched its first block (it then waits for the SPORT to drain it); 0 after 10 us */
+static int Wait_Tx_Dma_Ready(void)
+{
+	cycle_t start, now;
+	START_CYCLE_COUNT(start);
+	do
+	{
+		if ((*pREG_DMA10_STAT & BITM_DMA_STAT_RUN) == ENUM_DMA_STAT_ACKWAIT)
+		{
+			return 1;
+		}
+		START_CYCLE_COUNT(now);
+	} while ((uint32_t)now - (uint32_t)start < 10000u);
+	return 0;
+}
 
+/* Busy-waits for a rising edge of LRCLK (DAI1_PB04, routed to both SPORT FS inputs); 0 after 100 us without one */
+static int Wait_Lrclk_Rise(void)
+{
+	cycle_t start, now;
+	uint32_t prev = *pREG_DAI1_PIN_STAT & BITM_DAI_PIN_STAT_PB04;
+	START_CYCLE_COUNT(start);
+	do
+	{
+		uint32_t cur = *pREG_DAI1_PIN_STAT & BITM_DAI_PIN_STAT_PB04;
+		if (cur != 0u && prev == 0u)
+		{
+			return 1;
+		}
+		prev = cur;
+		START_CYCLE_COUNT(now);
+	} while ((uint32_t)now - (uint32_t)start < 100000u);
+	return 0;
 }
 
 #define CHECK_SPORT_STEP(stepName, result) \
@@ -710,20 +733,40 @@ static int Sport_Init(void)
 	PrepareDescriptors();
 
 	/* Submit the first buffer for Rx.  */
-	eResult = adi_sport_DMATransfer(hSPORTDev4BRx,&iSRC_LIST_1_SP4B,(DMA_NUM_DESC),ADI_PDMA_DESCRIPTOR_LIST, ADI_SPORT_CHANNEL_PRIM);
+	eResult = adi_sport_DMATransfer(hSPORTDev4BRx,&iSRC_LIST_SP4B[0],(DMA_NUM_DESC),ADI_PDMA_DESCRIPTOR_LIST, ADI_SPORT_CHANNEL_PRIM);
 	CHECK_SPORT_STEP("adi_sport_DMATransfer(4B Rx)", eResult);
+	/* The driver has translated the descriptors to system addresses; SPORTCallback compares the RX DMA address with these */
+	g_RxBuf4Sys = (uint32_t)(uintptr_t)iSRC_LIST_SP4B[0].pStartAddr;
+	g_RxBuf5Sys = (uint32_t)(uintptr_t)iSRC_LIST_SP4B[1].pStartAddr;
 	/* Submit the first buffer for Tx.  */
-	eResult = adi_sport_DMATransfer(hSPORTDev4ATx,&iDESC_LIST_1_SP4A,(DMA_NUM_DESC),ADI_PDMA_DESCRIPTOR_LIST, ADI_SPORT_CHANNEL_PRIM);
+	eResult = adi_sport_DMATransfer(hSPORTDev4ATx,&iDESC_LIST_SP4A[0],(DMA_NUM_DESC),ADI_PDMA_DESCRIPTOR_LIST, ADI_SPORT_CHANNEL_PRIM);
 	CHECK_SPORT_STEP("adi_sport_DMATransfer(4A Tx)", eResult);
 
-	/*Enable the Sport Device 4B */
-	eResult = adi_sport_Enable(hSPORTDev4BRx,true);
-	CHECK_SPORT_STEP("adi_sport_Enable(4B Rx)", eResult);
-	/*Enable the Sport Device 4A */
-	eResult = adi_sport_Enable(hSPORTDev4ATx,true);
-	CHECK_SPORT_STEP("adi_sport_Enable(4A Tx)", eResult);
+	/* Start both SPORTs on the same frame, so S and F keep the same delay from boot to boot. Enabled back to back at a
+	 * random moment, the TX could start one frame (5.2 us) after the RX: an FS edge between the two enables, or a TX
+	 * enabled before its DMA had the first block (F moved by 1 frame between boots, 2026-11-06). So wait until the TX
+	 * DMA holds block 0 (it then waits for the SPORT to drain it), then enable both right after an LRCLK rising edge
+	 * (DAI1_PB04, the DAC's frame sync), a full frame before the next frame start. */
+	{
+		ADI_SPORT_RESULT eResultTx;
+		int txReady = Wait_Tx_Dma_Ready();
+		int synced;
 
-	printf("  [OK] SPORT 4A TX & 4B RX configured and enabled successfully\n");
+		adi_osal_EnterCriticalRegion();
+		synced = Wait_Lrclk_Rise();
+		eResult   = adi_sport_Enable(hSPORTDev4BRx,true);
+		eResultTx = adi_sport_Enable(hSPORTDev4ATx,true);
+		adi_osal_ExitCriticalRegion();
+		CHECK_SPORT_STEP("adi_sport_Enable(4B Rx)", eResult);
+		CHECK_SPORT_STEP("adi_sport_Enable(4A Tx)", eResultTx);
+		if (!txReady || !synced)
+		{
+			printf("  [WARN] SPORT start not synchronized (TX DMA ready %d, LRCLK edge %d): TX may start a frame late\n",
+				   txReady, synced);
+		}
+	}
+
+	printf("  [OK] SPORT 4A TX & 4B RX configured and enabled on the same frame\n");
 	fflush(stdout);
 
 	return eResult;
