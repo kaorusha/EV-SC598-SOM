@@ -1,9 +1,12 @@
 #include "anc_fxnlms.h"
 
-// 卷積函式固定 2048 / 1024 次迴圈，路徑長度改變時必須同步修改
-#if (ANC_S_TAPS != 2048) || (ANC_F_TAPS != 2048) || (ANC_W_TAPS != 1024)
-#error "fir_conv_2048 / fir_conv_1024 / lms_update_1024 assume S = F = 2048 taps, W = 1024 taps"
+// 卷積函式固定 2048 次迴圈，路徑長度改變時必須同步修改
+#if (ANC_S_TAPS != 2048) || (ANC_F_TAPS != 2048) || (ANC_W_TAPS != 2048)
+#error "fir_conv_2048 / lms_update_2048 / lms_leak_2048 assume S = F = W = 2048 taps"
 #endif
+// Ŝ / F̂ 標頭必須是 48 kHz 核心取樣 (tools/export_paths.py)。_FS 含 (uint32_t) 轉型無法放進 #if，改用陣列大小檢查:
+// 不符時陣列大小為 -1，編譯失敗
+typedef char anc_path_headers_must_be_48k[((SECOND_PATH_TAPS_FS == ANC_CORE_FS) && (FEEDBACK_PATH_TAPS_FS == ANC_CORE_FS)) ? 1 : -1];
 
 // SHARC+ L1 雙匯流排記憶體配置: 係數放 PM、歷史延遲線放 DM，卷積時每 cycle 可同時讀取兩者
 // 使用標準 #pragma section 語法，兼具 CCES 硬體記憶體映射與 Eclipse CDT / IDE 語法解析相容性
@@ -43,6 +46,11 @@ static float y_history[2 * ANC_Y_HIST_SIZE];
 static float px_power    = 0.01f;
 static int   anc_buf_idx = 0;
 static int   y_buf_idx   = 0;
+static float leak_acc    = 1.0f;   // 尚未套用的累積漏洩 (1 - ANC_LEAK)^n
+static int   leak_count  = 0;
+
+// 192 kHz <-> 48 kHz 邊界 (anc_rate.h): 誤差麥與參考麥各一個降頻器，抗噪波一個升頻器
+static ANC_Rate_State dec_err, dec_ref, int_y;
 
 // 初始化函式
 void ANC_Init(void)
@@ -72,6 +80,11 @@ void ANC_Init(void)
     px_power    = 0.01f;
     anc_buf_idx = 0;
     y_buf_idx   = 0;
+    leak_acc    = 1.0f;
+    leak_count  = 0;
+    anc_rate_reset(&dec_err);
+    anc_rate_reset(&dec_ref);
+    anc_rate_reset(&int_y);
 }
 
 /**
@@ -94,68 +107,63 @@ static inline float fir_conv_2048(const float ANC_PM * restrict h_rev, const flo
 }
 
 /**
- * @brief 1024 階 FIR 卷積 (固定 1024 次，兩指標同向遞增，供編譯器 SIMD 向量化)
- * @param h_rev       反轉係數 (h_rev[k] = h[1023-k])
- * @param hist_oldest 指向 x(n-1023)，hist_oldest[1023] = x(n)
+ * @brief 2048 階 LMS 權重更新 (固定 2048 次，兩指標同向遞增，供編譯器 SIMD 向量化)
+ *        漏洩不在此處逐點相乘 (會讓迴圈從 1.0 變 1.5 cycle/tap)，改由 lms_leak_2048 每 ANC_LEAK_INTERVAL 個取樣套用一次
+ * @param w_rev       反轉權重 (w_rev[k] = w[2047-k])
+ * @param hist_oldest 指向 x'(n-2047)，hist_oldest[2047] = x'(n)
  */
-static inline float fir_conv_1024(const float ANC_PM * restrict h_rev, const float * restrict hist_oldest)
-{
-    float sum = 0.0f;
-    int j;
-#if defined(__ADSPSHARC__) || defined(__ADSP21000__)
-    #pragma loop_count(1024, 1024, 2)
-#endif
-    for (j = 0; j < 1024; j++)
-    {
-        sum += h_rev[j] * hist_oldest[j];
-    }
-    return sum;
-}
-
-/**
- * @brief 1024 階 LMS 權重更新 (固定 1024 次，兩指標同向遞增，供編譯器 SIMD 向量化)
- *        漏洩不在此處逐點相乘 (會讓迴圈從 1.0 變 1.5 cycle/tap)，改由 lms_leak_1024 每區塊套用一次
- * @param w_rev       反轉權重 (w_rev[k] = w[1023-k])
- * @param hist_oldest 指向 x'(n-1023)，hist_oldest[1023] = x'(n)
- */
-static inline void lms_update_1024(float ANC_PM * restrict w_rev, const float * restrict hist_oldest, float grad_step)
+static inline void lms_update_2048(float ANC_PM * restrict w_rev, const float * restrict hist_oldest, float grad_step)
 {
     int j;
 #if defined(__ADSPSHARC__) || defined(__ADSP21000__)
-    #pragma loop_count(1024, 1024, 2)
+    #pragma loop_count(2048, 2048, 2)
 #endif
-    for (j = 0; j < 1024; j++)
+    for (j = 0; j < 2048; j++)
     {
         w_rev[j] += grad_step * hist_oldest[j];
     }
 }
 
 /**
- * @brief 區塊級漏洩: w *= (1 - ANC_LEAK)^frames，等效於逐取樣漏洩 (差異為 ANC_LEAK * grad_step 的二階項)
+ * @brief 累積漏洩: w *= (1 - ANC_LEAK)^n，等效於逐取樣漏洩 (差異為 ANC_LEAK * grad_step 的二階項)
  */
-static inline void lms_leak_1024(float ANC_PM * restrict w_rev, float leak_block)
+static inline void lms_leak_2048(float ANC_PM * restrict w_rev, float leak)
 {
     int j;
 #if defined(__ADSPSHARC__) || defined(__ADSP21000__)
-    #pragma loop_count(1024, 1024, 2)
+    #pragma loop_count(2048, 2048, 2)
 #endif
-    for (j = 0; j < 1024; j++)
+    for (j = 0; j < 2048; j++)
     {
-        w_rev[j] *= leak_block;
+        w_rev[j] *= leak;
     }
 }
 
-// 區塊級即時處理函式 (直接處理 SPORT DMA TDM4 四聲道數據: 每次步進 i += 4)
+/** @brief float 轉 int32 並飽和 (升頻濾波器的漣波可能略超過 ANC_SAFE_OUTPUT_LIMIT，但不會接近滿刻度) */
+static inline int float_to_q31(float v)
+{
+    if (v >  0.9999999f) v =  0.9999999f;
+    if (v < -1.0f)       v = -1.0f;
+    return (int)(v * 2147483647.0f);
+}
+
+// 區塊級即時處理函式 (直接處理 SPORT DMA TDM4 四聲道數據)
+// 每 ANC_DECIM 個 192 kHz frame 為一個 48 kHz 核心取樣: 降頻 -> FxNLMS -> 升頻
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 {
-    int i;
-    float leak_block = 1.0f; // 累積本區塊的漏洩係數 (1 - ANC_LEAK)^frames
+    int i, k;
 
-    for (i = 0; i < count; i += 4)
+    for (i = 0; i < count; i += 4 * ANC_DECIM)
     {
-        // 1. 定點轉浮點 (TDM 輸入映射: Slot 0 = pRxBuf[i] 為誤差麥 d; Slot 1 = pRxBuf[i+1] 為參考麥 x)
-        float d_n = (float)pRxBuf[i]   * (1.0f / 2147483648.0f); // 誤差麥克風 (Error Mic，Slot 0)
-        float x_n = (float)pRxBuf[i+1] * (1.0f / 2147483648.0f); // 參考麥克風 (Reference Mic，Slot 1)
+        // 1. 降頻 (TDM 輸入映射: Slot 0 為誤差麥 d; Slot 1 為參考麥 x)
+        //    每個 192 kHz frame 都經過抗混疊濾波，取這組最後一個 frame 的輸出當核心取樣 (延遲最小)
+        float d_n = 0.0f, x_n = 0.0f;
+        for (k = 0; k < ANC_DECIM; k++)
+        {
+            const int *pf = &pRxBuf[i + 4 * k];
+            d_n = anc_rate_filter(&dec_err, (float)pf[0] * (1.0f / 2147483648.0f)); // 誤差麥克風 (Error Mic，Slot 0)
+            x_n = anc_rate_filter(&dec_ref, (float)pf[1] * (1.0f / 2147483648.0f)); // 參考麥克風 (Reference Mic，Slot 1)
+        }
 
         // 2. 【反饋中和 (Feedback Neutralization)】 f_leak = F̂ * y，從 y(n-1) 往回 2048 點
         int k_y = (y_buf_idx > 0) ? (y_buf_idx - 1) : (ANC_Y_HIST_SIZE - 1);
@@ -169,7 +177,7 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 
         // 4. 【抗噪波卷積】y(n) = W * X
         const float *px = &x_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x(n)
-        float y_n = fir_conv_1024(w_coeffs, px - (ANC_W_TAPS - 1));
+        float y_n = fir_conv_2048(w_coeffs, px - (ANC_W_TAPS - 1));
 
         // [P0 修正]: 必須先限幅，才能寫入反饋歷史。否則估計的反饋波形與實際喇叭播出的波形會產生致命偏差！
         if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
@@ -196,24 +204,33 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         float norm_mu = ANC_MU / p_eff;
         if (norm_mu > ANC_MAX_MU) norm_mu = ANC_MAX_MU;
 
-        // 9. 權重梯度更新 (漏洩於區塊結尾統一套用)
+        // 9. 權重梯度更新 (漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散)
         float grad_step = norm_mu * e_n;
         const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
-        lms_update_1024(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
-        leak_block *= (1.0f - ANC_LEAK);
+        lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
+        leak_acc *= (1.0f - ANC_LEAK);
+        if (++leak_count >= ANC_LEAK_INTERVAL)
+        {
+            lms_leak_2048(w_coeffs, leak_acc);
+            leak_acc   = 1.0f;
+            leak_count = 0;
+        }
 
         // 10. 循環指標自增
         if (++anc_buf_idx >= ANC_X_HIST_SIZE) anc_buf_idx = 0;
 
-        // 12. 寫入 TDM4 輸出緩衝區 (4 channels per audio frame):
-        //   - 喇叭端 (J18): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波 y(n)
-        //   - 監聽端 (J4/J17): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic
-        pTxBuf[i + 0] = 0;                          // J18 左聲道 (Tip): 自動靜音 = 0
-        pTxBuf[i + 1] = (int)(y_n * 2147483647.0f); // J18 右聲道 (Ring): 反相抗噪波 y(n)
-        pTxBuf[i + 2] = pRxBuf[i];                  // J17 左聲道 (Tip): 原始 Error Mic
-        pTxBuf[i + 3] = pRxBuf[i+1];                // J17 右聲道 (Ring): 原始 Reference Mic
+        // 11. 升頻: y(n) 補零 (乘 ANC_DECIM 補回通帶增益) 後經同一濾波器去鏡像，寫入 ANC_DECIM 個 TDM4 frame
+        //   - 喇叭端 (J18): 左聲道(Tip)靜音=0，右聲道(Ring)輸出抗噪波
+        //   - 監聽端 (J4/J17): 左聲道(Tip)=Error Mic, 右聲道(Ring)=Ref Mic (192 kHz 原始訊號)
+        for (k = 0; k < ANC_DECIM; k++)
+        {
+            float y_hi = anc_rate_filter(&int_y, (k == 0) ? (float)ANC_DECIM * y_n : 0.0f);
+            int  *pt   = &pTxBuf[i + 4 * k];
+            const int *pf = &pRxBuf[i + 4 * k];
+            pt[0] = 0;                  // J18 左聲道 (Tip): 自動靜音 = 0
+            pt[1] = float_to_q31(y_hi); // J18 右聲道 (Ring): 反相抗噪波
+            pt[2] = pf[0];              // J17 左聲道 (Tip): 原始 Error Mic
+            pt[3] = pf[1];              // J17 右聲道 (Ring): 原始 Reference Mic
+        }
     }
-
-    // 11. 區塊級漏洩 (防止阻帶發散)
-    lms_leak_1024(w_coeffs, leak_block);
 }

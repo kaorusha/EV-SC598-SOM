@@ -29,7 +29,7 @@ to the terms of the associated Analog Devices License Agreement.
 
 /*
  * Application Mode (single switch):
- *   APP_MODE_ANC          : FxNLMS ANC.
+ *   APP_MODE_ANC          : FxNLMS ANC, 48 kHz core between 192 kHz codec samples (anc_rate.h).
  *                           J18 Right = anti-noise y(n), J4/J17 = Error / Ref Mic monitor.
  *   APP_MODE_PATH_MEASURE : REW bridge for secondary / feedback path measurement.
  *                           J16 Left = REW timing reference (chirp), J16 Right = REW sweep.
@@ -84,9 +84,15 @@ to the terms of the associated Analog Devices License Agreement.
 #define J16_SWEEP_SLOT          2   /* J16 AIN4 (PC Right = REW Sweep) */
 #define J16_CHIRP_SLOT          3   /* J16 AIN3 (PC Left  = REW Timing Reference) */
 
+#if (COUNT % (4 * ANC_DECIM)) != 0
+#error "COUNT must hold whole 48 kHz core samples (4 * ANC_DECIM ints)"
+#endif
+#define BLOCK_FRAMES            (COUNT / 4)                /* TDM4 frames per DMA block */
+#define CALLBACKS_PER_S         (192000u / BLOCK_FRAMES)   /* 48000 with 4-frame blocks */
+
 /* Per-slot ADC peak meter, printed from main loop (not from the SPORT callback) */
 #define ENABLE_SLOT_PEAK_METER  0  /* JTAG printf halts the core -> clicks; set 0 during REW sweeps */
-#define PEAK_METER_CALLBACKS    24000u  /* 192kHz / 16 frames = 12000 callbacks/s -> print every ~2 s */
+#define PEAK_METER_CALLBACKS    (2u * CALLBACKS_PER_S)  /* print every ~2 s */
 
 /* Raw ADC capture: ~1 s after start-up, records ADC_CAPTURE_LEN consecutive samples of one slot into
  * g_AdcCapture[] and main() writes them to ADC_CAPTURE_FILE over JTAG (decimal + hex per line, for checking
@@ -127,7 +133,7 @@ to the terms of the associated Analog Devices License Agreement.
  */
 #define ENABLE_CYCLE_METER      0
 #define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
-#define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * 16.0f / 192000.0f)  /* 16 frames @ 192kHz = 83.3 us */
+#define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * (float)BLOCK_FRAMES / 192000.0f)  /* 4 frames @ 192kHz = 20.8 us */
 
 struct Config_Table
 {
@@ -314,7 +320,7 @@ static void Update_Adc_Capture(const int *pIn)
 #if ENABLE_CYCLE_METER
 /* Process_Block() cycles since last print, updated in SPORT callback */
 static volatile uint32_t g_CycleMax = 0;
-static volatile uint32_t g_CycleSum = 0;  /* 24000 blocks x < 100k cycles fits in 32 bits */
+static volatile uint32_t g_CycleSum = 0;  /* ~2 s of blocks, each under its budget: < 2e9 cycles, fits in 32 bits */
 static volatile uint32_t g_CycleBlocks = 0;
 #endif
 
@@ -380,7 +386,7 @@ static void Path_Measure_Process_Block(const int *pIn, int *pOut)
 }
 #endif
 
-/* Route one DMA block (COUNT samples = 16 TDM4 frames) according to APP_MODE; shared by both ping-pong buffers */
+/* Route one DMA block (COUNT samples = BLOCK_FRAMES TDM4 frames) according to APP_MODE; shared by both ping-pong buffers */
 static void Process_Block_Body(const int *pIn, int *pOut);
 
 static void Process_Block(const int *pIn, int *pOut)
@@ -1042,7 +1048,7 @@ int main(int argc, char *argv[])
 		printf("\n=======================================================\n");
 		printf(">>> SYSTEM READY: Running audio streaming talkthrough <<<\n");
 #if (APP_MODE == APP_MODE_ANC)
-		printf(">>> MODE: ANC (FxNLMS)\n");
+		printf(">>> MODE: ANC (FxNLMS, 48 kHz core, codec 192 kHz)\n");
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
@@ -1113,7 +1119,7 @@ int main(int argc, char *argv[])
 		uint32_t t0 = TestCallbackCount;
 		uint32_t n;
 		FILE *fp;
-		while ((uint32_t)(TestCallbackCount - t0) < 12000u) {}
+		while ((uint32_t)(TestCallbackCount - t0) < CALLBACKS_PER_S) {}
 		g_AdcCaptureIdx = 0;
 		g_AdcCaptureDone = 0;
 		while (!g_AdcCaptureDone) {}
@@ -1163,7 +1169,7 @@ int main(int argc, char *argv[])
 					/* Line 1: #n      = TestCallbackCount at print time
 					 *         blocks  = blocks timed since last print
 					 *         avg/max = mean / slowest Process_Block_Body() cycles, shown as us and % of budget
-					 *         budget  = 16 frames @ 192 kHz in core cycles
+					 *         budget  = BLOCK_FRAMES frames @ 192 kHz in core cycles
 					 * Line 2: period  = measured cycles per block over the interval
 					 *         load    = avg / period, the true load without assuming CORE_CLOCK_HZ */
 					printf("[CYCLES #%u] blocks=%u avg=%.0f (%.1f us, %.1f%%) max=%u (%.1f us, %.1f%%) budget=%.0f\n",

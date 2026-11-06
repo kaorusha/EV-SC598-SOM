@@ -25,12 +25,14 @@ to the terms of the associated Analog Devices License Agreement.
 /* Enable this macro for continuous audio */
 #define ADI_CONFIG_CONTINUOUS_AUDIO		1
 
-/* 
- * DMA Buffer Size (TDM4 Mode: 4 frames per buffer block): 
- * COUNT = 16 (4 frames * 4 ADC/DAC channels).
- * Minimizes DSP latency to meet 12cm acoustic causality!
+/*
+ * DMA Buffer Size (TDM4 Mode: 4 frames per buffer block):
+ * COUNT = 16 (4 frames * 4 ADC/DAC channels) = one 48 kHz ANC core sample (anc_rate.h ANC_DECIM).
+ * A core sample is taken at the last frame of a block and its output starts two blocks later on the wire,
+ * so the DMA adds 5 frames (26 us) to the loop; 16-frame blocks added 32 frames (167 us).
+ * Must stay a multiple of 4 * ANC_DECIM.
  */
-#define COUNT 64
+#define COUNT 16
 
 #define SPORT_DEVICE_4A 			4u			/* SPORT device number */
 #define SPORT_DEVICE_4B 			4u			/* SPORT device number */
