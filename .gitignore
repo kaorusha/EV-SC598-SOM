@@ -67,13 +67,6 @@ $RECYCLE.BIN/
 .LSOverride
 ._*
 
-# ==============================================================================
-# ANC Measurement & Acoustic Path Models, generated from local measurements by tools/export_paths.py
-# (48 kHz core, since 2026-11-05; the older REW-based ones came from ../FxNLMS/read_path.py)
-# ==============================================================================
-second_path.h
-feedback_path.h
-
 # Claude Code personal settings
 .claude/settings.local.json
 
