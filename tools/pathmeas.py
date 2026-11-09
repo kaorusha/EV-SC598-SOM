@@ -36,7 +36,8 @@ Run with the anc_project conda env, from any directory:
   python tools/pathmeas.py analyze [folder]   analyse a day folder again (default: today's)
 
 Data go to measurements/sweep/YYYY-MM-DD/ (gitignored):
-  "<MMDD> <path> <level> <length> rN".wav/.json   raw mono float32 recording, settings, Windows volumes and xruns
+  "<MMDD> <path> <level> <length> rN".wav/.json   raw mono float32 recording, settings, notes, Windows volumes,
+                                                  firmware source commit and xruns
   "<MMDD> <path> <level> <length>".npz            complex response of each run, their mean, noise floor
   "<MMDD> <path> <level> <length> IR.wav"         impulse response of the mean, for REW's Import impulse response
   "<MMDD> <path> <length>.png", "<MMDD> SF <length>.png", report.txt
@@ -47,6 +48,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -64,6 +66,7 @@ FIRMWARE_C = REPO / 'Audio_Talkthrough_I2S.c'
 DATA_ROOT = REPO / 'measurements' / 'sweep'
 
 DEVICE = 'USB Audio Device'   # UGREEN US205 in the WASAPI device list
+JACK = {'S': 'J17 Left (Error mic)', 'F': 'J17 Right (Ref mic)'}   # in the US205 mic input for each path
 FS = 48000
 F1, F2 = 40.0, 20000.0        # sweep range (Hz). S/F carry nothing below ~60 Hz, and starting at 40 Hz spares
                               # the speaker the low-frequency excursion suspected behind the audible doubling
@@ -118,6 +121,28 @@ def firmware_settings():
     gain = re.search(r'#define\s+CALIBRATION_CHIRP_GAIN\s+([0-9.eE+-]+)', src)
     mode = re.search(r'#define\s+APP_MODE\s+(\w+)', src)
     return (float(gain.group(1)) if gain else 0.05), (mode.group(1) if mode else None)
+
+
+def git_state(paths=()):
+    """Short HEAD hash and the tracked files with uncommitted changes (under paths, if given); None without git."""
+    def git(*args):
+        return subprocess.run(('git', '-C', str(REPO)) + args, capture_output=True, text=True, check=True).stdout
+    try:
+        head = git('rev-parse', '--short', 'HEAD').strip()
+        changed = git('status', '--porcelain', '--untracked-files=no', '--', *paths).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return dict(commit=head, modified=[line[3:] for line in changed])
+
+
+def source_text(state):
+    """'d1ae254 + uncommitted Audio_Talkthrough_I2S.c, APP_MODE_PATH_MEASURE' for a git_state() result (a run's
+    'firmware' record adds app_mode)."""
+    state = state or {}
+    text = state.get('commit') or 'no git checkout'
+    if state.get('modified'):
+        text += ' + uncommitted ' + ', '.join(state['modified'])
+    return text + (f", {state['app_mode']}" if state.get('app_mode') else '')
 
 
 def import_sounddevice():
@@ -621,6 +646,8 @@ def report_group(g, out):
             vols.setdefault(t, []).append(m['name'].split()[-1])
     for t, rs in vols.items():
         out.append(f"Windows volume{'' if len(vols) == 1 else ' ' + ', '.join(rs)}: {t}")
+    for t in dict.fromkeys(source_text(m['firmware']) for m in g['metas'] if 'firmware' in m):
+        out.append(f'Firmware source: {t}')
     if len(g['runs']) > 1:
         r0 = g['runs'][0]
         tz = [time_zero_us(r0, r) for r in g['runs'][1:]]
@@ -898,10 +925,12 @@ def cmd_measure(a):
                 tag=a.tag, fs=FS, f1=F1, f2=F2, n_sweep=n_sweep, n_lead=int(LEAD_S * FS),
                 n_delay=int(DELAY_S * FS), n_tail=int(TAIL_S * FS), n_refs=N_REFS, ref_dbfs=a.ref_level,
                 chirp_gain=chirp_gain, device_out=dev_out['name'], device_in=dev_in['name'],
-                exclusive=exclusive, notes=a.notes)
+                exclusive=exclusive, notes=a.notes, firmware=dict(git_state() or {}, app_mode=mode))
     run_s = (base['n_lead'] + N_REFS * base['n_delay'] + n_sweep + base['n_tail']) / FS + PREROLL_S + MARGIN_S
-    jack = 'J17 Left (Error mic)' if a.path == 'S' else 'J17 Right (Ref mic)'
+    jack = JACK[a.path]
     print(f"Output {dev_out['name']}, input {dev_in['name']}, WASAPI {'exclusive' if exclusive else 'shared'}, {FS} Hz")
+    print('Firmware source (recorded with each run; say in --notes if the board runs another build): '
+          + source_text(base['firmware']))
     vol = read_volumes(dev_out, dev_in)
     print(f'Windows volume (recorded with each run): {volume_text(vol)}')
     for w in volume_warnings(vol):
@@ -1146,8 +1175,9 @@ def main():
     m.add_argument('--length', default='2M', help='sweep length in samples: 1M, 2M, 4M (512k puts the 2nd harmonic '
                                                   'into the reference window)')
     m.add_argument('--tag', default='', help='extra word in the file names, e.g. knob3')
-    m.add_argument('--notes', default='', help='free text stored with each run (knob mark, cables); the Windows '
-                                               'volumes are recorded automatically')
+    m.add_argument('--notes', default='', help='free text stored with each run and copied into the exported header '
+                                               '(who is in front of the outlet, knob, cables, firmware build); the '
+                                               'Windows volumes and the git commit are recorded automatically')
     m.add_argument('--device', default=DEVICE)
     m.add_argument('--shared', action='store_true', help='WASAPI shared mode instead of exclusive')
     m.add_argument('--use-level', type=float, help='level (dBFS) for the S/F comparison; default the quietest')
