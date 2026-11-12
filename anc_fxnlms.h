@@ -21,16 +21,35 @@
 #define ANC_X_HIST_SIZE     ((ANC_W_TAPS > SECOND_PATH_TAPS) ? (ANC_W_TAPS) : (SECOND_PATH_TAPS))
 #define ANC_Y_HIST_SIZE     (FEEDBACK_PATH_TAPS)
 
+// 迴路內參考帶通 (anc_ref_band.h): 回授中和後、送進 W 與 Ŝ 之前；誤差麥不濾波
+#define ANC_REF_BAND_NONE       0   // 不濾波
+#define ANC_REF_BAND_400_1500   1   // 100% duty 只消 600 Hz (限幅 0.2 時)
+#define ANC_REF_BAND_400_5000   2   // 30-100% duty 的轉速音與 BPF (100% duty 須先放大限幅)
+#define ANC_REF_BAND            ANC_REF_BAND_400_1500
+
 // 正規化步長 mu: w -= mu * e * x' / (ANC_W_TAPS * x' 功率 + ANC_EPSILON)，不另設上限
 // (舊的步長上限 0.005 加上 ANC_EPSILON 0.005，讓步長固定在 0.005、W 幾乎不動，已移除)
+#if (ANC_REF_BAND == ANC_REF_BAND_NONE)
+#define ANC_REF_BAND_NAME   "none"
 #define ANC_MU              0.002f   // 不濾波: x' 幾乎都是 Ŝ 共振附近的低頻，300 Hz 單音穩定上限 0.0064；FxNLMS.py 模擬 0.01 會在低頻發散
+#elif (ANC_REF_BAND == ANC_REF_BAND_400_1500)
+#define ANC_REF_BAND_NAME   "400-1500 Hz"
+#define ANC_MU              0.01f    // 2026-11-09 模擬 100% duty、限幅 0.2: 穩定，602 Hz 降 20.8 dB
+#elif (ANC_REF_BAND == ANC_REF_BAND_400_5000)
+#define ANC_REF_BAND_NAME   "400-5000 Hz"
+#define ANC_MU              0.01f    // 各音調的穩定上限最小約 0.033 (30% duty 的 1132 Hz)；FxNLMS.py 模擬 30-100% duty 都穩定
+#else
+#error "unknown ANC_REF_BAND"
+#endif
 #define ANC_LEAK            0.00001f // 每個核心取樣的漏洩係數 (防止阻帶發散，時間常數 2.1 s)
 #define ANC_LEAK_INTERVAL   16       // 每 16 個核心取樣套用一次累積漏洩 (逐取樣套用每 tap 多 1 cycle)
-#define ANC_EPSILON         1e-11f   // 正規化分母底限，板子單位 (ADC 滿刻度 = 1)。暫定值，
-                                     // 該設為風扇關閉時 ANC_W_TAPS * x' 功率的量級
+#define ANC_EPSILON         1e-11f   // 正規化分母底限，板子單位 (ADC 滿刻度 = 1)。暫定值，由 8/4 錄音換算:
+                                     // 帶通後的 ANC_W_TAPS * x' 功率在 20% duty 約 8e-12、100% 約 1.4e-8。
+                                     // 該設為風扇關閉時的量級
 #define ANC_PWR_SMOOTH_ALPHA 0.999f  // 功率估計 IIR 平滑常數 (歷史權重，時間常數 1000 取樣 = 20.8 ms)
 #define ANC_PWR_SMOOTH_BETA  0.001f  // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
-#define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS，防破音與大音量爆音)
+#define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS)。由 8/4 錄音估計，100% duty 的 600 Hz 約需 0.2、
+                                     // 3.6 kHz 約需 0.7；30%、50% duty 都在 0.08 以下
 
 // TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):
 //     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出抗噪波 y(n)

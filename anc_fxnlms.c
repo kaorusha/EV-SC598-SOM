@@ -1,4 +1,5 @@
 #include "anc_fxnlms.h"
+#include "anc_ref_band.h"
 
 // 卷積函式固定 2048 次迴圈，路徑長度改變時必須同步修改
 #if (ANC_S_TAPS != 2048) || (ANC_F_TAPS != 2048) || (ANC_W_TAPS != 2048)
@@ -52,6 +53,9 @@ static int   leak_count  = 0;
 // 192 kHz <-> 48 kHz 邊界 (anc_rate.h): 誤差麥與參考麥各一個降頻器，抗噪波一個升頻器
 static ANC_Rate_State dec_err, dec_ref, int_y;
 
+// 迴路內參考帶通 (anc_ref_band.h)
+static ANC_Ref_Band_State ref_band;
+
 // 初始化函式
 void ANC_Init(void)
 {
@@ -85,6 +89,7 @@ void ANC_Init(void)
     anc_rate_reset(&dec_err);
     anc_rate_reset(&dec_ref);
     anc_rate_reset(&int_y);
+    anc_ref_band_reset(&ref_band);
 }
 
 /**
@@ -171,6 +176,10 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         const float *py_oldest = &y_history[k_y + ANC_Y_HIST_SIZE - (ANC_F_TAPS - 1)];
         float f_leak  = fir_conv_2048(f_hat_rev, py_oldest);
         float u_hat_n = x_n - f_leak;
+#if (ANC_REF_BAND != ANC_REF_BAND_NONE)
+        // 2b. 迴路內參考帶通 (anc_ref_band.h): 只讓要消的音調進 W 與 Ŝ，誤差麥不濾波
+        u_hat_n = anc_ref_band_filter(&ref_band, u_hat_n);
+#endif
 
         // 3. 雙鏡像更新參考訊號歷史緩衝區
         x_history[anc_buf_idx] = u_hat_n;
