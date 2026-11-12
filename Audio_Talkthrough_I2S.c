@@ -48,7 +48,7 @@ to the terms of the associated Analog Devices License Agreement.
 #define APP_MODE_DIAG_LINE_IN   3
 #define APP_MODE_DIAG_DAC_ID    4
 
-#define APP_MODE                APP_MODE_PATH_MEASURE  /* Select application mode here */
+#define APP_MODE                APP_MODE_ANC  /* Select application mode here */
 
 /*
  * Gain staging (measured, Windows volume 100%): REW -12 dBFS -> J16 slot peak -6 dBFS (tracks 1:1).
@@ -135,8 +135,9 @@ to the terms of the associated Analog Devices License Agreement.
  * Ignore the first print: blocks count from boot, the elapsed stamp starts in main loop.
  * The hard limit is below the budget: the TX DMA fetches block k+2 16.2k cycles (78% of the block) after the callback
  * entry for RX block k (DMA probe, 2026-11-06), so Process_Block must be done by then; keep max under about 75%.
+ * On in APP_MODE_ANC only (the 48 kHz core's load is still a cc21k estimate); never during PATH_MEASURE sweeps.
  */
-#define ENABLE_CYCLE_METER      0
+#define ENABLE_CYCLE_METER      (APP_MODE == APP_MODE_ANC)
 #define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
 #define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * (float)BLOCK_FRAMES / 192000.0f)  /* 4 frames @ 192kHz = 20.8 us */
 
