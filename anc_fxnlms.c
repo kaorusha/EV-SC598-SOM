@@ -56,6 +56,15 @@ static ANC_Rate_State dec_err, dec_ref, int_y;
 // 迴路內參考帶通 (anc_ref_band.h)
 static ANC_Ref_Band_State ref_band;
 
+// 延遲啟動: wait_samples 數到 0 之前 y = 0、W 不更新 (中斷裡遞減，main loop 經 ANC_Get_Status 讀)
+static volatile uint32_t wait_samples = 0u;
+static volatile uint32_t run_samples  = 0u;   // 啟動後的核心取樣數
+
+// 狀態統計: 中斷裡累加，ANC_Get_Status 讀出後清除。和 cycle meter 一樣不關中斷，
+// 讀與清之間進來的一兩個取樣可能算到下一段或遺漏，對 ~2 s 的統計可忽略
+static volatile uint32_t st_samples = 0u, st_clipped = 0u;
+static volatile float    st_ref_sum = 0.0f, st_err_sum = 0.0f, st_y_peak = 0.0f;
+
 // 初始化函式
 void ANC_Init(void)
 {
@@ -90,6 +99,13 @@ void ANC_Init(void)
     anc_rate_reset(&dec_ref);
     anc_rate_reset(&int_y);
     anc_ref_band_reset(&ref_band);
+    wait_samples = ANC_START_DELAY_S * ANC_CORE_FS;
+    run_samples  = 0u;
+    st_samples   = 0u;
+    st_clipped   = 0u;
+    st_ref_sum   = 0.0f;
+    st_err_sum   = 0.0f;
+    st_y_peak    = 0.0f;
 }
 
 /**
@@ -158,6 +174,8 @@ static inline int float_to_q31(float v)
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 {
     int i, k;
+    uint32_t n_core = 0u, n_clip = 0u;
+    float ref_sum = 0.0f, err_sum = 0.0f, y_peak = 0.0f;
 
     for (i = 0; i < count; i += 4 * ANC_DECIM)
     {
@@ -191,8 +209,13 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 
         // [P0 修正]: 必須先限幅，才能寫入反饋歷史。否則估計的反饋波形與實際喇叭播出的波形會產生致命偏差！
         if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
-        if (y_n > ANC_SAFE_OUTPUT_LIMIT)  y_n = ANC_SAFE_OUTPUT_LIMIT;
-        if (y_n < -ANC_SAFE_OUTPUT_LIMIT) y_n = -ANC_SAFE_OUTPUT_LIMIT;
+        float y_abs = (y_n < 0.0f) ? -y_n : y_n;
+        if (y_abs > y_peak) y_peak = y_abs;
+        if (y_abs > ANC_SAFE_OUTPUT_LIMIT)
+        {
+            y_n = (y_n > 0.0f) ? ANC_SAFE_OUTPUT_LIMIT : -ANC_SAFE_OUTPUT_LIMIT;
+            n_clip++;
+        }
 
         // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅後的 y_n)
         y_history[y_buf_idx] = y_n;
@@ -207,23 +230,31 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         // 7. 誤差訊號
         float e_n = d_n;
 
-        // 8. 功率追蹤: IIR 平滑的 x' 短期平均功率
+        // 8. 功率追蹤: IIR 平滑的 x' 短期平均功率 (等待期間照常更新，ANC 啟動時已收斂)
         px_power = ANC_PWR_SMOOTH_ALPHA * px_power + ANC_PWR_SMOOTH_BETA * (x_prime_n * x_prime_n);
 
         // 9. NLMS 權重更新，梯度下降: e = d + S*y，e 對 w 的梯度是 x'，所以
         //    w -= mu * e * x' / (ANC_W_TAPS * Px' + eps)
         //    (舊版是 w += ...，y 送出時又不反相，等於往誤差變大的方向更新；Ŝ 與 S 同極性，負號必須在這裡)
         //    漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散
-        float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
-        float grad_step = -(ANC_MU / p_eff) * e_n;
-        const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
-        lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
-        leak_acc *= (1.0f - ANC_LEAK);
-        if (++leak_count >= ANC_LEAK_INTERVAL)
+        if (wait_samples == 0u)
         {
-            lms_leak_2048(w_coeffs, leak_acc);
-            leak_acc   = 1.0f;
-            leak_count = 0;
+            float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
+            float grad_step = -(ANC_MU / p_eff) * e_n;
+            const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
+            lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
+            leak_acc *= (1.0f - ANC_LEAK);
+            if (++leak_count >= ANC_LEAK_INTERVAL)
+            {
+                lms_leak_2048(w_coeffs, leak_acc);
+                leak_acc   = 1.0f;
+                leak_count = 0;
+            }
+            if (run_samples != 0xFFFFFFFFu) run_samples++;
+        }
+        else
+        {
+            wait_samples--;   // 延遲啟動中: W 維持 0，y = 0
         }
 
         // 10. 循環指標自增
@@ -242,5 +273,49 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             pt[2] = pf[0];              // J17 左聲道 (Tip): 原始 Error Mic
             pt[3] = pf[1];              // J17 右聲道 (Ring): 原始 Reference Mic
         }
+
+        n_core++;
+        ref_sum += x_n * x_n;
+        err_sum += d_n * d_n;
     }
+
+    // 狀態統計，main loop 由 ANC_Get_Status 讀出
+    st_samples += n_core;
+    st_clipped += n_clip;
+    st_ref_sum += ref_sum;
+    st_err_sum += err_sum;
+    if (y_peak > st_y_peak) st_y_peak = y_peak;
+}
+
+bool ANC_Is_Running(void)
+{
+    return wait_samples == 0u;
+}
+
+void ANC_Get_Status(ANC_Status *st)
+{
+    uint32_t n = st_samples;
+    float w2 = 0.0f;
+    int j;
+
+    st->samples = n;
+    st->clipped = st_clipped;
+    st->ref_ms  = (n > 0u) ? st_ref_sum / (float)n : 0.0f;
+    st->err_ms  = (n > 0u) ? st_err_sum / (float)n : 0.0f;
+    st->y_peak  = st_y_peak;
+    st_samples  = 0u;
+    st_clipped  = 0u;
+    st_ref_sum  = 0.0f;
+    st_err_sum  = 0.0f;
+    st_y_peak   = 0.0f;
+
+    st->running = (wait_samples == 0u);
+    st->seconds = st->running ? (float)run_samples / (float)ANC_CORE_FS
+                              : -(float)wait_samples / (float)ANC_CORE_FS;
+    st->p_x     = px_power * (float)ANC_W_TAPS;
+    for (j = 0; j < ANC_W_TAPS; j++)
+    {
+        w2 += w_coeffs[j] * w_coeffs[j];
+    }
+    st->w_energy = w2;
 }

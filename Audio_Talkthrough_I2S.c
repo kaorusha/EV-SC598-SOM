@@ -140,6 +140,22 @@ to the terms of the associated Analog Devices License Agreement.
 #define CORE_CLOCK_HZ           1000000000.0f  /* SHARC+ core clock, check against the CGU setting */
 #define BLOCK_BUDGET_CYCLES     (CORE_CLOCK_HZ * (float)BLOCK_FRAMES / 192000.0f)  /* 4 frames @ 192kHz = 20.8 us */
 
+/* ANC status line (APP_MODE_ANC), printed from main loop with the meters above every PEAK_METER_CALLBACKS:
+ *   wait/run = ANC off for ANC_START_DELAY_S after boot (y = 0, anc_fxnlms.h), then on
+ *   t        = seconds since ANC started (negative while waiting: seconds to go)
+ *   ref, err = rms of the raw Ref / Err core samples, dB re ADC full scale (20 log10 rms). Fan on, ANC off: compare
+ *              with the 8/4 NI-9234 recordings converted to board units (100% duty about -44 / -63 dB)
+ *   Px'      = ANC_W_TAPS * x' power, the NLMS denominator without ANC_EPSILON. With the fan off it is the level
+ *              ANC_EPSILON should have
+ *   y_pk     = max |y| before the clamp; clip = samples clamped at ANC_SAFE_OUTPUT_LIMIT / samples
+ *   W2       = sum of w^2; growing without bound = diverging
+ * JTAG printf halts the core, and once ANC runs the speaker clicks at every print. So after ANC starts, all periodic
+ * prints (meters included) stop after ANC_PRINTS_AFTER_START lines, leaving the rest of the run clean for recording.
+ * -1 keeps printing. */
+#define ENABLE_ANC_STATUS       1
+#define ANC_PRINTS_AFTER_START  5     /* ~10 s */
+#define ANC_STATUS_ON           (ENABLE_ANC_STATUS && (APP_MODE == APP_MODE_ANC))
+
 /* DMA timing probe (diagnostic, any APP_MODE). Records the TX (SPORT 4A = DMA10) and RX (SPORT 4B = DMA11) DMA positions:
  *   - start-up trace, logged on every change: from the TX DMA submit (SPORTs still off) until the first RX blocks are in.
  *     Shows how many words the TX DMA prefetches and when each SPORT starts.
@@ -1331,6 +1347,8 @@ int main(int argc, char *argv[])
 		printf(">>> SYSTEM READY: Running audio streaming talkthrough <<<\n");
 #if (APP_MODE == APP_MODE_ANC)
 		printf(">>> MODE: ANC (FxNLMS, 48 kHz core, codec 192 kHz)\n");
+		printf(">>> Ref band %s, mu %g, eps %g, clamp %g; ANC starts %u s after boot\n",
+			   ANC_REF_BAND_NAME, ANC_MU, ANC_EPSILON, ANC_SAFE_OUTPUT_LIMIT, ANC_START_DELAY_S);
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
@@ -1433,10 +1451,15 @@ int main(int argc, char *argv[])
 		fflush(stdout);
 	}
 #endif
-#if ENABLE_SLOT_PEAK_METER || ENABLE_CYCLE_METER
+#if ENABLE_SLOT_PEAK_METER || ENABLE_CYCLE_METER || ANC_STATUS_ON
 	{
 		uint32_t lastCount = TestCallbackCount;
+#if ENABLE_SLOT_PEAK_METER
 		int s, peak[4];
+#endif
+#if (APP_MODE == APP_MODE_ANC)
+		int runPrints = 0;   /* prints since ANC started */
+#endif
 #if ENABLE_CYCLE_METER
 		cycle_t lastStamp;
 		START_CYCLE_COUNT(lastStamp);
@@ -1446,6 +1469,17 @@ int main(int argc, char *argv[])
 			if ((uint32_t)(TestCallbackCount - lastCount) >= PEAK_METER_CALLBACKS)
 			{
 				lastCount = TestCallbackCount;
+#if (APP_MODE == APP_MODE_ANC)
+				/* Quiet once ANC has run for ANC_PRINTS_AFTER_START prints: JTAG printf halts the core -> clicks */
+				if (ANC_Is_Running())
+				{
+					if ((ANC_PRINTS_AFTER_START >= 0) && (runPrints >= ANC_PRINTS_AFTER_START))
+					{
+						continue;
+					}
+					runPrints++;
+				}
+#endif
 #if ENABLE_CYCLE_METER
 				{
 					uint32_t cmax = g_CycleMax, csum = g_CycleSum, cn = g_CycleBlocks;
@@ -1472,6 +1506,18 @@ int main(int argc, char *argv[])
 						   BLOCK_BUDGET_CYCLES);
 					printf("[CYCLES #%u] measured block period=%.0f cycles (load avg %.1f%%)\n",
 						   lastCount, period, (period > 0.0f) ? (100.0f * cavg / period) : 0.0f);
+					fflush(stdout);
+				}
+#endif
+#if ANC_STATUS_ON
+				{
+					ANC_Status st;
+					ANC_Get_Status(&st);
+					/* Fields are explained at ENABLE_ANC_STATUS */
+					printf("[ANC #%u] %s t=%+.1f s  ref=%.1f err=%.1f dB  Px'=%.2e  y_pk=%.3f clip=%u/%u  W2=%.3e\n",
+						   lastCount, st.running ? "run " : "wait", st.seconds,
+						   10.0f * log10f(st.ref_ms + 1e-30f), 10.0f * log10f(st.err_ms + 1e-30f),
+						   st.p_x, st.y_peak, st.clipped, st.samples, st.w_energy);
 					fflush(stdout);
 				}
 #endif

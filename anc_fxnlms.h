@@ -45,11 +45,13 @@
 #define ANC_LEAK_INTERVAL   16       // 每 16 個核心取樣套用一次累積漏洩 (逐取樣套用每 tap 多 1 cycle)
 #define ANC_EPSILON         1e-11f   // 正規化分母底限，板子單位 (ADC 滿刻度 = 1)。暫定值，由 8/4 錄音換算:
                                      // 帶通後的 ANC_W_TAPS * x' 功率在 20% duty 約 8e-12、100% 約 1.4e-8。
-                                     // 該設為風扇關閉時的量級
+                                     // 該設為風扇關閉時的量級: 看 ANC 狀態列印的 Px' (Audio_Talkthrough_I2S.c)
 #define ANC_PWR_SMOOTH_ALPHA 0.999f  // 功率估計 IIR 平滑常數 (歷史權重，時間常數 1000 取樣 = 20.8 ms)
 #define ANC_PWR_SMOOTH_BETA  0.001f  // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
 #define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS)。由 8/4 錄音估計，100% duty 的 600 Hz 約需 0.2、
                                      // 3.6 kHz 約需 0.7；30%、50% duty 都在 0.08 以下
+#define ANC_START_DELAY_S   15u      // 開機後 ANC 先關閉這麼多秒 (y = 0、W 不更新，功率估計照常)，
+                                     // 同一段錄音前段是關、後段是開；也留時間離開出風口前方
 
 // TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):
 //     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出抗噪波 y(n)
@@ -59,8 +61,24 @@
 //      故 DAC1/2 收到 Slot 2/3；以 APP_MODE_DIAG_DAC_ID 實測，刻意維持不改 register)
 // (麥克風直通驗證請改用 Audio_Talkthrough_I2S.c 的 APP_MODE_DIAG_MIC)
 
+// ANC 狀態，main loop 每 ~2 s 讀一次並印出 (Audio_Talkthrough_I2S.c 的 ENABLE_ANC_STATUS)
+typedef struct
+{
+    bool     running;   // false: 還在 ANC_START_DELAY_S 的等待期間 (y = 0)
+    float    seconds;   // 啟動後的秒數 (等待中為負值: 距離啟動還有幾秒)
+    uint32_t samples;   // 這段期間的核心取樣數
+    uint32_t clipped;   // 其中 y 被限幅的取樣數
+    float    ref_ms;    // 參考麥原始訊號的均方值 (回授中和、帶通之前)
+    float    err_ms;    // 誤差麥的均方值
+    float    y_peak;    // 限幅前的最大 |y|
+    float    p_x;       // ANC_W_TAPS * x' 功率 = 正規化分母扣掉 ANC_EPSILON
+    float    w_energy;  // sum w^2 (持續變大 = 發散)
+} ANC_Status;
+
 // 對外 API 函式宣告
 void ANC_Init(void);
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count);  // count 須為 4 * ANC_DECIM 的倍數
+bool ANC_Is_Running(void);              // ANC_START_DELAY_S 過了沒
+void ANC_Get_Status(ANC_Status *st);    // 讀出並清除這段期間的統計 (main loop 呼叫，非中斷)
 
 #endif /* _ANC_FXNLMS_H_ */
