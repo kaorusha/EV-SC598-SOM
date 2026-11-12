@@ -107,7 +107,8 @@ static inline float fir_conv_2048(const float ANC_PM * restrict h_rev, const flo
 }
 
 /**
- * @brief 2048 階 LMS 權重更新 (固定 2048 次，兩指標同向遞增，供編譯器 SIMD 向量化)
+ * @brief 2048 階 LMS 權重更新 w += grad_step * x' (固定 2048 次，兩指標同向遞增，供編譯器 SIMD 向量化)
+ *        梯度下降的負號由呼叫端放進 grad_step
  *        漏洩不在此處逐點相乘 (會讓迴圈從 1.0 變 1.5 cycle/tap)，改由 lms_leak_2048 每 ANC_LEAK_INTERVAL 個取樣套用一次
  * @param w_rev       反轉權重 (w_rev[k] = w[2047-k])
  * @param hist_oldest 指向 x'(n-2047)，hist_oldest[2047] = x'(n)
@@ -197,15 +198,15 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         // 7. 誤差訊號
         float e_n = d_n;
 
-        // 8. 功率追蹤與歸一化步長 (NLMS)
-        // 使用 IIR 濾波器計算參考訊號的短期平均功率
+        // 8. 功率追蹤: IIR 平滑的 x' 短期平均功率
         px_power = ANC_PWR_SMOOTH_ALPHA * px_power + ANC_PWR_SMOOTH_BETA * (x_prime_n * x_prime_n);
-        float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
-        float norm_mu = ANC_MU / p_eff;
-        if (norm_mu > ANC_MAX_MU) norm_mu = ANC_MAX_MU;
 
-        // 9. 權重梯度更新 (漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散)
-        float grad_step = norm_mu * e_n;
+        // 9. NLMS 權重更新，梯度下降: e = d + S*y，e 對 w 的梯度是 x'，所以
+        //    w -= mu * e * x' / (ANC_W_TAPS * Px' + eps)
+        //    (舊版是 w += ...，y 送出時又不反相，等於往誤差變大的方向更新；Ŝ 與 S 同極性，負號必須在這裡)
+        //    漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散
+        float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
+        float grad_step = -(ANC_MU / p_eff) * e_n;
         const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
         lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
         leak_acc *= (1.0f - ANC_LEAK);
@@ -228,7 +229,7 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             int  *pt   = &pTxBuf[i + 4 * k];
             const int *pf = &pRxBuf[i + 4 * k];
             pt[0] = 0;                  // J18 左聲道 (Tip): 自動靜音 = 0
-            pt[1] = float_to_q31(y_hi); // J18 右聲道 (Ring): 反相抗噪波
+            pt[1] = float_to_q31(y_hi); // J18 右聲道 (Ring): 抗噪波 y (不另外反相，見 anc_fxnlms.h)
             pt[2] = pf[0];              // J17 左聲道 (Tip): 原始 Error Mic
             pt[3] = pf[1];              // J17 右聲道 (Ring): 原始 Reference Mic
         }

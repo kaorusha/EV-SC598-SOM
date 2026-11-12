@@ -21,17 +21,20 @@
 #define ANC_X_HIST_SIZE     ((ANC_W_TAPS > SECOND_PATH_TAPS) ? (ANC_W_TAPS) : (SECOND_PATH_TAPS))
 #define ANC_Y_HIST_SIZE     (FEEDBACK_PATH_TAPS)
 
-#define ANC_MU              0.007f   // 48 kHz 核心的收斂步長 (192 kHz 核心時為 0.00175)
+// 正規化步長 mu: w -= mu * e * x' / (ANC_W_TAPS * x' 功率 + ANC_EPSILON)，不另設上限
+// (舊的步長上限 0.005 加上 ANC_EPSILON 0.005，讓步長固定在 0.005、W 幾乎不動，已移除)
+#define ANC_MU              0.002f   // 不濾波: x' 幾乎都是 Ŝ 共振附近的低頻，300 Hz 單音穩定上限 0.0064；FxNLMS.py 模擬 0.01 會在低頻發散
 #define ANC_LEAK            0.00001f // 每個核心取樣的漏洩係數 (防止阻帶發散，時間常數 2.1 s)
 #define ANC_LEAK_INTERVAL   16       // 每 16 個核心取樣套用一次累積漏洩 (逐取樣套用每 tap 多 1 cycle)
-#define ANC_EPSILON         0.005f   // 功率門檻底限 (防止靜音時除以接近0導致步長暴增)
-#define ANC_MAX_MU          0.005f   // 48 kHz 核心的歸一化步長上限保護 (192 kHz 核心時為 0.00125)
+#define ANC_EPSILON         1e-11f   // 正規化分母底限，板子單位 (ADC 滿刻度 = 1)。暫定值，
+                                     // 該設為風扇關閉時 ANC_W_TAPS * x' 功率的量級
 #define ANC_PWR_SMOOTH_ALPHA 0.999f  // 功率估計 IIR 平滑常數 (歷史權重，時間常數 1000 取樣 = 20.8 ms)
 #define ANC_PWR_SMOOTH_BETA  0.001f  // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
 #define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS，防破音與大音量爆音)
 
 // TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):
-//     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出反相抗噪波 y(n)
+//     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出抗噪波 y(n)
+//       (y 送出時不另外反相: Ŝ 量測時 y 的極性與此相同，W 以梯度下降自己學成與噪音反相)
 //     - J4/J17 (絲印 DAC 1/2, SPORT Slot 2/3): Tip(左) = Error Mic 殘留誤差, Ring(右) = Ref Mic
 //     (DAC_CTRL1 預設 LRCLK 50% duty + 正常極性，DAC frame 起點與 SPORT 差半個 TDM4 frame，
 //      故 DAC1/2 收到 Slot 2/3；以 APP_MODE_DIAG_DAC_ID 實測，刻意維持不改 register)
