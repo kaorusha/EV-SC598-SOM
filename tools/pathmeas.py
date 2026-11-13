@@ -399,11 +399,16 @@ def locate_ref(env, fs, n_d, n_refs=1):
     return m
 
 
+def wander_k(meta):
+    """k = exp(D / L): a log sweep reaches k*f exactly D after it passes f (1.0585 for 4M, 1.1205 for 2M)."""
+    return (meta['f2'] / meta['f1']) ** (meta['n_delay'] / meta['n_sweep'])
+
+
 def wander_phase(f, r1, r2, valid, meta):
     """Phase 2 pi f dJ(f) that undoes the timing change dJ between reference 2 and the path at each bin, from
     the two reference spectra at k*f (see the module docstring). Returns the phase and the bins it covers
     (k*f must stay inside the valid band)."""
-    k = (meta['f2'] / meta['f1']) ** (meta['n_delay'] / meta['n_sweep'])
+    k = wander_k(meta)
     idx = np.flatnonzero(valid)
     fv = f[idx]
     q = r2[idx] / r1[idx]
@@ -462,7 +467,11 @@ def analyse_run(rec, meta, correct_wander=True):
     if n_refs == 2:
         theta, covered = wander_phase(f, sp['ref1'], sp['ref2'], valid, meta)
         valid &= covered
-        b = valid & (f >= 300) & (f <= 16000)
+        # The report's wander: the largest timing change the correction removed. It stops where k*f passes the
+        # reference's -6 dB point (f_top): beyond that ref2 / ref1 is mostly noise and its unwrapped phase walks
+        # off (2M F runs on the 48k firmware read 130-750 us at 13-16 kHz, against <= 60 us below). The
+        # correction itself is left as it is; above f_top / k it only touches X inside the f2_ir fade.
+        b = valid & (f >= 300) & (f <= min(16000.0, f_top / wander_k(meta)))
         wander_us = float(np.max(np.abs(theta[b] / (2 * np.pi * f[b]))) * 1e6)
         if not correct_wander:
             theta = np.zeros(f.size)
@@ -870,7 +879,9 @@ def analyze_folder(folder, use_level=None, plots=True):
     for (mmdd, length, tag, path, level), v in sorted(items.items()):
         g = analyse_group(sorted(v, key=lambda x: x[0]['run']))
         sessions.setdefault((mmdd, length, tag), {}).setdefault(path, {})[level] = g
-    out = [f'Path measurement report: {folder}']
+    out = [f'Path measurement report: {folder}',
+           'wander = the largest US205 playback-to-capture timing change between reference 2 and the path, '
+           'which the correction removed (300 Hz up to where k*f reaches the reference -6 dB point)']
     for (mmdd, length, tag), paths in sessions.items():
         for path in (p for p in 'SF' if p in paths):
             gs = paths[path]
