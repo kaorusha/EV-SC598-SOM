@@ -41,12 +41,15 @@ to the terms of the associated Analog Devices License Agreement.
  *   APP_MODE_DIAG_MIC     : Mic passthrough, no ANC. J18 Right = Ref Mic, J4/J17 = Error / Ref Mic.
  *   APP_MODE_DIAG_LINE_IN : J16 Left/Right -> J18 and J4/J17 Left/Right (check PC line-in, use with slot peak meter).
  *   APP_MODE_DIAG_DAC_ID  : DAC slot s beeps (s+1) times every 2 s, no input (check slot -> jack/ear wiring).
+ *   APP_MODE_SPEAKER_TEST : Speaker linearity test (speaker_test.h): 3614 / 602 Hz sines as y, in ANC units, stepped up
+ *                           to full scale while the Err mic is measured, to choose ANC_SAFE_OUTPUT_LIMIT. Fan off.
  */
 #define APP_MODE_ANC            0
 #define APP_MODE_PATH_MEASURE   1
 #define APP_MODE_DIAG_MIC       2
 #define APP_MODE_DIAG_LINE_IN   3
 #define APP_MODE_DIAG_DAC_ID    4
+#define APP_MODE_SPEAKER_TEST   5
 
 #define APP_MODE                APP_MODE_ANC  /* Select application mode here */
 
@@ -457,6 +460,10 @@ static void Path_Measure_Process_Block(const int *pIn, int *pOut)
 }
 #endif
 
+#if (APP_MODE == APP_MODE_SPEAKER_TEST)
+#include "speaker_test.h"   /* Spk_Init, Spk_Print_Plan, Spk_Process_Block, Spk_Run */
+#endif
+
 /* Route one DMA block (COUNT samples = BLOCK_FRAMES TDM4 frames) according to APP_MODE; shared by both ping-pong buffers */
 static void Process_Block_Body(const int *pIn, int *pOut);
 
@@ -489,6 +496,8 @@ static void Process_Block_Body(const int *pIn, int *pOut)
 	Path_Measure_Process_Block(pIn, pOut);
 #elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
 	Id_Tone_Process_Block(pOut);
+#elif (APP_MODE == APP_MODE_SPEAKER_TEST)
+	Spk_Process_Block(pIn, pOut, COUNT);
 #elif (APP_MODE == APP_MODE_DIAG_MIC) || (APP_MODE == APP_MODE_DIAG_LINE_IN)
 	{
 		int i;
@@ -1324,6 +1333,8 @@ int main(int argc, char *argv[])
 	fflush(stdout);
 #elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
 	Id_Tone_Init();
+#elif (APP_MODE == APP_MODE_SPEAKER_TEST)
+	Spk_Init();
 #endif
 
 	/* SPORT Initialization */
@@ -1371,6 +1382,8 @@ int main(int argc, char *argv[])
 		printf(">>> MODE: DIAG DAC Slot ID Beeps (1 kHz, -20 dBFS, every 2 s)\n");
 		printf(">>> Slot 0 = 1 beep, Slot 1 = 2 beeps, Slot 2 = 3 beeps, Slot 3 = 4 beeps\n");
 		printf(">>> Expected: J18 L/R = 1/2 beeps, J4/J17 L/R = 3/4 beeps\n");
+#elif (APP_MODE == APP_MODE_SPEAKER_TEST)
+		Spk_Print_Plan();
 #endif
 		printf("=======================================================\n\n");
 		fflush(stdout);
@@ -1450,6 +1463,12 @@ int main(int argc, char *argv[])
 			printf("[CAPTURE] fopen failed: %s\n", path);
 		}
 		fflush(stdout);
+	}
+#endif
+#if (APP_MODE == APP_MODE_SPEAKER_TEST)
+	if (Result == 0u)
+	{
+		Spk_Run();   /* prints each step once it has faded out, then a summary; the output stays muted afterwards */
 	}
 #endif
 #if ENABLE_SLOT_PEAK_METER || ENABLE_CYCLE_METER || ANC_STATUS_ON
