@@ -154,11 +154,13 @@ to the terms of the associated Analog Devices License Agreement.
  *              ANC_EPSILON should have
  *   y_pk     = max |y| before the clamp; clip = samples clamped at ANC_SAFE_OUTPUT_LIMIT / samples
  *   W2       = sum of w^2; growing without bound = diverging
- * JTAG printf halts the core, and once ANC runs the speaker clicks at every print. So after ANC starts, all periodic
- * prints (meters included) stop after ANC_PRINTS_AFTER_START lines, leaving the rest of the run clean for recording.
- * They come back after a divergence trip, since the speaker is muted then. -1 keeps printing. */
+ * JTAG printf halts the core, and the SPORT DMA replays its last buffers meanwhile. So once ANC runs, every print
+ * freezes the output (a DC level or a buzz: 0.5 s for the two [ANC TRIP] lines, J18 R recording 2026-11-17), stops W
+ * adapting and clicks when the core resumes. After ANC starts, all periodic prints (meters included) stop after
+ * ANC_PRINTS_AFTER_START lines (0: right at the start). They come back after a divergence trip, since the speaker is
+ * muted then. -1 keeps printing. */
 #define ENABLE_ANC_STATUS       1
-#define ANC_PRINTS_AFTER_START  5     /* ~10 s */
+#define ANC_PRINTS_AFTER_START  0     /* 2026-11-17: no prints while ANC runs (5 gave ~10 s of status, a click each) */
 #define ANC_STATUS_ON           (ENABLE_ANC_STATUS && (APP_MODE == APP_MODE_ANC))
 
 /* DMA timing probe (diagnostic, any APP_MODE). Records the TX (SPORT 4A = DMA10) and RX (SPORT 4B = DMA11) DMA positions:
@@ -1421,6 +1423,9 @@ int main(int argc, char *argv[])
 			   ANC_REF_BAND_NAME, ANC_MU, ANC_EPSILON, ANC_SAFE_OUTPUT_LIMIT, ANC_START_DELAY_S);
 		printf(">>> Divergence guard: speaker muted if over %.0f%% of samples clip (%.2f s average)\n",
 			   100.0f * ANC_TRIP_CLIP_FRACTION, ANC_TRIP_TAU_S);
+#if (ANC_PRINTS_AFTER_START == 0)
+		printf(">>> No status prints while ANC runs (JTAG printf would freeze the output), back after a trip\n");
+#endif
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
