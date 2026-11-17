@@ -916,6 +916,48 @@ static int Wait_Lrclk_Rise(void)
 	return 0;
 }
 
+/*
+ * Stop SPORT4 and its DMAs if a previous program left them running. Call first in main(), before adi_initComponents().
+ *
+ * A core-only reset (CCES_runner, a debugger reload) leaves the peripherals running: SPORT4 A/B and DMA10/11 go on
+ * through buffers and descriptors that the new program's memory has replaced, and a DMA can latch an error.
+ * adi_sport_Open(4A) resets only its own DMA, then enables the SPORT DMA error interrupt that all half SPORTs share
+ * (SEC source 254). An error latched by DMA11 then arrives as IID 0x132 before 4B has a handler: a fatal "no handler
+ * registered" in Sport_Init (2026-11-13 18:03). The SEC itself is reset by adi_sec_Init() in adi_initComponents().
+ */
+typedef struct
+{
+	uint32_t ctlA, ctlB;       /* SPORT4_CTL_A/B as found */
+	uint32_t stat10, stat11;   /* DMA10/11_STAT as found */
+	int      found;            /* a half SPORT or a DMA was enabled, or a DMA had latched an interrupt */
+} Leftover_Sport;
+
+static Leftover_Sport Stop_Leftover_Sport(void)
+{
+	const uint32_t dmaW1c = BITM_DMA_STAT_IRQDONE | BITM_DMA_STAT_IRQERR | BITM_DMA_STAT_PIRQ;
+	const uint32_t spen   = BITM_SPORT_CTL_A_SPENPRI | BITM_SPORT_CTL_A_SPENSEC;   /* same bits in CTL_B */
+	Leftover_Sport s;
+
+	s.ctlA   = *pREG_SPORT4_CTL_A;
+	s.ctlB   = *pREG_SPORT4_CTL_B;
+	s.stat10 = *pREG_DMA10_STAT;
+	s.stat11 = *pREG_DMA11_STAT;
+	s.found  = (((s.ctlA | s.ctlB) & spen) != 0u)
+	        || (((*pREG_DMA10_CFG | *pREG_DMA11_CFG) & BITM_DMA_CFG_EN) != 0u)
+	        || (((s.stat10 | s.stat11) & dmaW1c) != 0u);
+
+	*pREG_SPORT4_CTL_A = 0u;          /* the half SPORTs first, so they stop requesting data */
+	*pREG_SPORT4_CTL_B = 0u;
+	*pREG_DMA10_CFG    = 0u;          /* EN = 0 stops a channel at once */
+	*pREG_DMA11_CFG    = 0u;
+	*pREG_DMA10_STAT   = dmaW1c;      /* then clear what they latched (write 1 to clear) */
+	*pREG_DMA11_STAT   = dmaW1c;
+	/* sticky SPORT errors; the interrupt masks go to 0 until adi_sport_Open() sets them again */
+	*pREG_SPORT4_ERR_A = BITM_SPORT_ERR_A_FSERRSTAT | BITM_SPORT_ERR_A_DERRSSTAT | BITM_SPORT_ERR_A_DERRPSTAT;
+	*pREG_SPORT4_ERR_B = BITM_SPORT_ERR_B_FSERRSTAT | BITM_SPORT_ERR_B_DERRSSTAT | BITM_SPORT_ERR_B_DERRPSTAT;
+	return s;
+}
+
 #define CHECK_SPORT_STEP(stepName, result) \
 	do { \
 		if ((result) != ADI_SPORT_SUCCESS) { \
@@ -1268,6 +1310,10 @@ int main(int argc, char *argv[])
 	 */
 
 	uint32_t Result=0;
+	Leftover_Sport leftover;
+
+	/* Before anything else: a reload after a core-only reset finds the previous program's SPORT4 and DMAs running */
+	leftover = Stop_Leftover_Sport();
 
 	adi_initComponents();
 #if defined(__ADSPARM__)
@@ -1282,6 +1328,17 @@ int main(int argc, char *argv[])
 	printf("\n========================================\n");
 	printf("=== SC598 ANC Talkthrough Diagnostic ===\n");
 	printf("========================================\n");
+	if (leftover.found)
+	{
+		printf("[Step 0] SPORT4/DMA10-11 left by the previous program, stopped and cleared: SPORT4 CTL A/B 0x%08X/0x%08X,"
+			   " DMA10/11 STAT 0x%08X/0x%08X%s\n", (unsigned)leftover.ctlA, (unsigned)leftover.ctlB,
+			   (unsigned)leftover.stat10, (unsigned)leftover.stat11,
+			   (((leftover.stat10 | leftover.stat11) & BITM_DMA_STAT_IRQERR) != 0u) ? " (DMA error latched)" : "");
+	}
+	else
+	{
+		printf("[Step 0] SPORT4/DMA10-11 idle at boot\n");
+	}
 	fflush(stdout);
 
     /* SPU initialization */
