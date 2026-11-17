@@ -5,9 +5,9 @@
  * Speaker linearity test (APP_MODE_SPEAKER_TEST). Header-only: Audio_Talkthrough_I2S.c includes it in that mode only,
  * after its slot map.
  *
- * Purpose: find the largest y the speaker reproduces cleanly, to set ANC_SAFE_OUTPUT_LIMIT (anc_fxnlms.h). The 0.2
- * there is a first-run guard against divergence. Cancelling the 3.6 kHz BPF at 100% duty needs y of about 0.72 and
- * 602 Hz about 0.2 (8/4 recordings), about 0.92 peak together.
+ * Purpose: find the largest y the speaker reproduces cleanly, to set ANC_SAFE_OUTPUT_LIMIT (anc_fxnlms.h). It was 0.2,
+ * a first-run guard against divergence, until the 2026-11-16 run of SPK_PLAN_HOLD set it to 0.9. Cancelling the 3.6 kHz
+ * BPF at 100% duty needs y of about 0.72 and 602 Hz about 0.2 (8/4 recordings), about 0.92 peak together.
  *
  * The core plays sines as y in ANC units: the same 48 kHz core rate, the same x4 interpolation (anc_rate.h) and J18 Right
  * output as ANC_Process_Block, so y = 1.0 is DAC full scale. The Err mic is decimated as in ANC and measured at the core

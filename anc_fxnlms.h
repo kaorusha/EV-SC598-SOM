@@ -23,8 +23,8 @@
 
 // 迴路內參考帶通 (anc_ref_band.h): 回授中和後、送進 W 與 Ŝ 之前；誤差麥不濾波
 #define ANC_REF_BAND_NONE       0   // 不濾波
-#define ANC_REF_BAND_400_1500   1   // 100% duty 只消 600 Hz (限幅 0.2 時)
-#define ANC_REF_BAND_400_5000   2   // 30-100% duty 的轉速音與 BPF (100% duty 須先放大限幅)
+#define ANC_REF_BAND_400_1500   1   // 100% duty 只消 600 Hz。第一次 ANC 實測先用這個
+#define ANC_REF_BAND_400_5000   2   // 30-100% duty 的轉速音與 BPF (100% duty 的 BPF 要 y 約 0.7，限幅 0.9 夠用)
 #define ANC_REF_BAND            ANC_REF_BAND_400_1500
 
 // 正規化步長 mu: w -= mu * e * x' / (ANC_W_TAPS * x' 功率 + ANC_EPSILON)，不另設上限
@@ -48,8 +48,10 @@
                                      // 該設為風扇關閉時的量級: 看 ANC 狀態列印的 Px' (Audio_Talkthrough_I2S.c)
 #define ANC_PWR_SMOOTH_ALPHA 0.999f  // 功率估計 IIR 平滑常數 (歷史權重，時間常數 1000 取樣 = 20.8 ms)
 #define ANC_PWR_SMOOTH_BETA  0.001f  // 功率估計 IIR 平滑常數 (新值權重，與 ALPHA 相加為 1)
-#define ANC_SAFE_OUTPUT_LIMIT 0.20f  // 初測安全限幅 (約 -14 dBFS)。由 8/4 錄音估計，100% duty 的 600 Hz 約需 0.2、
-                                     // 3.6 kHz 約需 0.7；30%、50% duty 都在 0.08 以下
+#define ANC_SAFE_OUTPUT_LIMIT 0.90f  // 輸出限幅 (約 -0.9 dBFS)。2026-11-16 喇叭測試 (APP_MODE_SPEAKER_TEST): 3614 Hz 0.72 加
+                                     // 602 Hz 0.20 (峰值 0.92) 連放 5 分鐘、單音到 1.0 都沒有失真或壓縮。100% duty 約需
+                                     // 0.24 (600 Hz) + 0.65-0.92 (3.6 kHz，隨出風口前方的環境變)；30%、50% duty 都在 0.08 以下。
+                                     // 測過的只是兩個純音 (RMS 0.53)；發散時持續截斷會接近 RMS 0.9，要看狀態列的 clip
 #define ANC_START_DELAY_S   15u      // 開機後 ANC 先關閉這麼多秒 (y = 0、W 不更新，功率估計照常)，
                                      // 同一段錄音前段是關、後段是開；也留時間離開出風口前方
 

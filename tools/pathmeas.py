@@ -85,7 +85,7 @@ NOISE_GAP_S = 0.3             # noise window opens this long after the path wind
 TONES = (189, 300, 602, 1131, 1800, 3614)                # fan tones (Hz)
 OCTAVES = (63, 125, 250, 500, 1000, 2000, 4000, 8000)
 DELAY_BAND = (200.0, 4000.0)  # band for the run-to-run time-zero estimate
-Y_MAX = 0.2                   # ANC output limit |y|, for the "Err reach" row
+Y_MAX = 0.9                   # ANC output limit |y| (ANC_SAFE_OUTPUT_LIMIT, anc_fxnlms.h), for the "Err reach" row
 
 # Chart colours on the light surface; S and F keep their colour in every figure
 SURFACE, INK, INK2, MUTED, GRID, AXIS = '#fcfcfb', '#0b0b0b', '#52514e', '#898781', '#e1e0d9', '#c3c2b7'

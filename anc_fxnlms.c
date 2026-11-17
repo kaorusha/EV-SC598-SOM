@@ -161,7 +161,8 @@ static inline void lms_leak_2048(float ANC_PM * restrict w_rev, float leak)
     }
 }
 
-/** @brief float 轉 int32 並飽和 (升頻濾波器的漣波可能略超過 ANC_SAFE_OUTPUT_LIMIT，但不會接近滿刻度) */
+/** @brief float 轉 int32 並飽和 (升頻濾波器的漣波會讓輸出略超過 ANC_SAFE_OUTPUT_LIMIT；限幅 0.9 時，一直被截斷的波形
+ *         可能超過滿刻度，在這裡飽和) */
 static inline int float_to_q31(float v)
 {
     if (v >  0.9999999f) v =  0.9999999f;
