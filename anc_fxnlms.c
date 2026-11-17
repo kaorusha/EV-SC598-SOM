@@ -65,6 +65,30 @@ static volatile uint32_t run_samples  = 0u;   // 啟動後的核心取樣數
 static volatile uint32_t st_samples = 0u, st_clipped = 0u;
 static volatile float    st_ref_sum = 0.0f, st_err_sum = 0.0f, st_y_peak = 0.0f;
 
+// 發散保護 (anc_fxnlms.h 的 ANC_TRIP_*): 中斷裡更新；判定當時的數值由 main loop 經 ANC_Get_Trip 讀
+#define ANC_TRIP_ALPHA      (1.0f / (ANC_TRIP_TAU_S * (float)ANC_CORE_FS))               // 指數平均的新值權重
+#define ANC_TRIP_FADE_STEP  (1000.0f / ((float)ANC_TRIP_FADE_MS * (float)ANC_CORE_FS))  // 每個核心取樣的淡出量
+#define ANC_TRIP_QUIET_SAMPLES ((ANC_TRIP_QUIET_MS * ANC_CORE_FS) / 1000u)              // 淡出完再等這麼多取樣才回報
+static float clip_avg = 0.0f;   // 截斷比例
+static float zc_avg   = 0.0f;   // 過零率 (每個核心取樣)
+static float zc_wt    = 0.0f;   // 同樣平均的 1。zc_avg / zc_wt 補正從 0 起算的偏低 (啟動後不久就判定時)
+static float y_hold   = 0.0f;   // 限幅前 |y| 的峰值，以 ANC_TRIP_TAU_S 衰減
+static bool  y_neg    = false;  // 上一個 y 為負 (過零偵測)
+static float out_gain = 1.0f;   // 判定後從 1 線性降到 0
+static volatile uint32_t quiet_samples = 0u;   // 淡出完後的取樣數 (數到 ANC_TRIP_QUIET_SAMPLES 為止)
+static volatile ANC_Trip_Reason trip_reason = ANC_TRIP_NONE;
+static volatile float trip_seconds = 0.0f, trip_clip = 0.0f, trip_peak = 0.0f, trip_hz = 0.0f;
+
+/** @brief 判定發散，記下當時的數值。trip_reason 最後寫：main loop 看到它時，其他欄位已經寫好 */
+static void anc_trip(ANC_Trip_Reason reason)
+{
+    trip_seconds = (float)run_samples / (float)ANC_CORE_FS;
+    trip_clip    = clip_avg;
+    trip_peak    = y_hold;
+    trip_hz      = (zc_wt > 0.0f) ? (zc_avg / zc_wt) * (float)ANC_CORE_FS * 0.5f : 0.0f;
+    trip_reason  = reason;
+}
+
 // 初始化函式
 void ANC_Init(void)
 {
@@ -106,6 +130,14 @@ void ANC_Init(void)
     st_ref_sum   = 0.0f;
     st_err_sum   = 0.0f;
     st_y_peak    = 0.0f;
+    clip_avg     = 0.0f;
+    zc_avg       = 0.0f;
+    zc_wt        = 0.0f;
+    y_hold       = 0.0f;
+    y_neg        = false;
+    out_gain     = 1.0f;
+    quiet_samples = 0u;
+    trip_reason  = ANC_TRIP_NONE;
 }
 
 /**
@@ -206,16 +238,45 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 
         // 4. 【抗噪波卷積】y(n) = W * X
         const float *px = &x_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x(n)
-        float y_n = fir_conv_2048(w_coeffs, px - (ANC_W_TAPS - 1));
+        float y_n = (out_gain > 0.0f) ? fir_conv_2048(w_coeffs, px - (ANC_W_TAPS - 1)) : 0.0f;  // 發散保護淡出完 y = 0
 
         // [P0 修正]: 必須先限幅，才能寫入反饋歷史。否則估計的反饋波形與實際喇叭播出的波形會產生致命偏差！
-        if (y_n != y_n) y_n = 0.0f; // NaN 熔斷保護
+        if (y_n != y_n)   // NaN 熔斷保護: W 已經壞了，交給發散保護
+        {
+            y_n = 0.0f;
+            if (trip_reason == ANC_TRIP_NONE) anc_trip(ANC_TRIP_NAN);
+        }
         float y_abs = (y_n < 0.0f) ? -y_n : y_n;
         if (y_abs > y_peak) y_peak = y_abs;
-        if (y_abs > ANC_SAFE_OUTPUT_LIMIT)
+        bool clipped = (y_abs > ANC_SAFE_OUTPUT_LIMIT);
+        if (clipped)
         {
             y_n = (y_n > 0.0f) ? ANC_SAFE_OUTPUT_LIMIT : -ANC_SAFE_OUTPUT_LIMIT;
             n_clip++;
+        }
+
+        // 4b. 發散保護 (anc_fxnlms.h 的 ANC_TRIP_*): ANC 啟動後追蹤截斷比例、過零率與 |y| 峰值；判定後 y 淡出到 0
+        if ((trip_reason == ANC_TRIP_NONE) && (wait_samples == 0u))
+        {
+            bool neg = (y_n < 0.0f);
+            clip_avg += ANC_TRIP_ALPHA * ((clipped ? 1.0f : 0.0f) - clip_avg);
+            zc_avg   += ANC_TRIP_ALPHA * (((neg != y_neg) ? 1.0f : 0.0f) - zc_avg);
+            zc_wt    += ANC_TRIP_ALPHA * (1.0f - zc_wt);
+            y_hold    = (y_abs > y_hold) ? y_abs : y_hold * (1.0f - ANC_TRIP_ALPHA);
+            y_neg     = neg;
+            if (clip_avg > ANC_TRIP_CLIP_FRACTION) anc_trip(ANC_TRIP_CLIP);
+        }
+        if (trip_reason != ANC_TRIP_NONE)
+        {
+            y_n *= out_gain;
+            if (out_gain > 0.0f)
+            {
+                out_gain = (out_gain > ANC_TRIP_FADE_STEP) ? (out_gain - ANC_TRIP_FADE_STEP) : 0.0f;
+            }
+            else if (quiet_samples < ANC_TRIP_QUIET_SAMPLES)
+            {
+                quiet_samples++;   // 升頻濾波器的拖尾和 DMA 緩衝都歸零後，main loop 才印 log
+            }
         }
 
         // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅後的 y_n)
@@ -240,16 +301,19 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         //    漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散
         if (wait_samples == 0u)
         {
-            float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
-            float grad_step = -(ANC_MU / p_eff) * e_n;
-            const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
-            lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
-            leak_acc *= (1.0f - ANC_LEAK);
-            if (++leak_count >= ANC_LEAK_INTERVAL)
+            if (trip_reason == ANC_TRIP_NONE)   // 判定發散後 W 停住，保留當時的值
             {
-                lms_leak_2048(w_coeffs, leak_acc);
-                leak_acc   = 1.0f;
-                leak_count = 0;
+                float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
+                float grad_step = -(ANC_MU / p_eff) * e_n;
+                const float *pxf = &x_filt_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x'(n)
+                lms_update_2048(w_coeffs, pxf - (ANC_W_TAPS - 1), grad_step);
+                leak_acc *= (1.0f - ANC_LEAK);
+                if (++leak_count >= ANC_LEAK_INTERVAL)
+                {
+                    lms_leak_2048(w_coeffs, leak_acc);
+                    leak_acc   = 1.0f;
+                    leak_count = 0;
+                }
             }
             if (run_samples != 0xFFFFFFFFu) run_samples++;
         }
@@ -311,6 +375,7 @@ void ANC_Get_Status(ANC_Status *st)
     st_y_peak   = 0.0f;
 
     st->running = (wait_samples == 0u);
+    st->tripped = (trip_reason != ANC_TRIP_NONE);
     st->seconds = st->running ? (float)run_samples / (float)ANC_CORE_FS
                               : -(float)wait_samples / (float)ANC_CORE_FS;
     st->p_x     = px_power * (float)ANC_W_TAPS;
@@ -319,4 +384,25 @@ void ANC_Get_Status(ANC_Status *st)
         w2 += w_coeffs[j] * w_coeffs[j];
     }
     st->w_energy = w2;
+}
+
+bool ANC_Get_Trip(ANC_Trip *t)
+{
+    ANC_Trip_Reason r = trip_reason;
+    if ((r == ANC_TRIP_NONE) || (quiet_samples < ANC_TRIP_QUIET_SAMPLES))
+    {
+        return false;   // 淡出中也回 false: printf 會讓核心暫停，DMA 重播最後的緩衝，輸出卡在當時的值
+    }
+    t->reason    = r;
+    t->seconds   = trip_seconds;
+    t->clip_frac = trip_clip;
+    t->y_peak    = trip_peak;
+    t->freq_hz   = trip_hz;
+    return true;
+}
+
+/** @brief 已判定發散、輸出還沒完全靜音 (淡出中，或等升頻濾波器與 DMA 緩衝歸零)。這時 printf 會讓輸出卡住 */
+bool ANC_Trip_Pending(void)
+{
+    return (trip_reason != ANC_TRIP_NONE) && (quiet_samples < ANC_TRIP_QUIET_SAMPLES);
 }

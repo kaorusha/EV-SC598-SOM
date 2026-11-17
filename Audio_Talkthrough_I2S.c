@@ -146,6 +146,7 @@ to the terms of the associated Analog Devices License Agreement.
 
 /* ANC status line (APP_MODE_ANC), printed from main loop with the meters above every PEAK_METER_CALLBACKS:
  *   wait/run = ANC off for ANC_START_DELAY_S after boot (y = 0, anc_fxnlms.h), then on
+ *   trip     = the divergence guard muted the speaker until reboot (ANC_TRIP_*, anc_fxnlms.h; see [ANC TRIP])
  *   t        = seconds since ANC started (negative while waiting: seconds to go)
  *   ref, err = rms of the raw Ref / Err core samples, dB re ADC full scale (20 log10 rms). Fan on, ANC off: compare
  *              with the 8/4 NI-9234 recordings converted to board units (100% duty about -44 / -63 dB)
@@ -155,7 +156,7 @@ to the terms of the associated Analog Devices License Agreement.
  *   W2       = sum of w^2; growing without bound = diverging
  * JTAG printf halts the core, and once ANC runs the speaker clicks at every print. So after ANC starts, all periodic
  * prints (meters included) stop after ANC_PRINTS_AFTER_START lines, leaving the rest of the run clean for recording.
- * -1 keeps printing. */
+ * They come back after a divergence trip, since the speaker is muted then. -1 keeps printing. */
 #define ENABLE_ANC_STATUS       1
 #define ANC_PRINTS_AFTER_START  5     /* ~10 s */
 #define ANC_STATUS_ON           (ENABLE_ANC_STATUS && (APP_MODE == APP_MODE_ANC))
@@ -1418,6 +1419,8 @@ int main(int argc, char *argv[])
 		printf(">>> MODE: ANC (FxNLMS, 48 kHz core, codec 192 kHz)\n");
 		printf(">>> Ref band %s, mu %g, eps %g, clamp %g; ANC starts %u s after boot\n",
 			   ANC_REF_BAND_NAME, ANC_MU, ANC_EPSILON, ANC_SAFE_OUTPUT_LIMIT, ANC_START_DELAY_S);
+		printf(">>> Divergence guard: speaker muted if over %.0f%% of samples clip (%.2f s average)\n",
+			   100.0f * ANC_TRIP_CLIP_FRACTION, ANC_TRIP_TAU_S);
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
@@ -1536,6 +1539,7 @@ int main(int argc, char *argv[])
 #endif
 #if (APP_MODE == APP_MODE_ANC)
 		int runPrints = 0;   /* prints since ANC started */
+		int tripPrinted = 0; /* [ANC TRIP] is out; the periodic prints come back (the speaker is muted) */
 #endif
 #if ENABLE_CYCLE_METER
 		cycle_t lastStamp;
@@ -1543,12 +1547,43 @@ int main(int argc, char *argv[])
 #endif
 		while(1)
 		{
+#if (APP_MODE == APP_MODE_ANC)
+			/* Divergence guard (ANC_TRIP_*, anc_fxnlms.h): ANC_Get_Trip waits until the ISR has muted the speaker;
+			 * log when and why */
+			if (!tripPrinted)
+			{
+				ANC_Trip trip;
+				if (ANC_Get_Trip(&trip))
+				{
+					if (trip.reason == ANC_TRIP_NAN)
+					{
+						printf("\n[ANC TRIP] W turned NaN %.1f s after ANC started.\n", trip.seconds);
+					}
+					else
+					{
+						printf("\n[ANC TRIP] Diverged %.1f s after ANC started: %.0f%% of samples clipped at %g (%.2f s average),"
+							   " y before the clamp up to %.2f, about %.0f Hz.\n",
+							   trip.seconds, 100.0f * trip.clip_frac, ANC_SAFE_OUTPUT_LIMIT, ANC_TRIP_TAU_S,
+							   trip.y_peak, trip.freq_hz);
+					}
+					printf("[ANC TRIP] Speaker muted (y = 0), W frozen. Reboot to run ANC again.\n\n");
+					fflush(stdout);
+					tripPrinted = 1;
+				}
+			}
+#endif
 			if ((uint32_t)(TestCallbackCount - lastCount) >= PEAK_METER_CALLBACKS)
 			{
 				lastCount = TestCallbackCount;
 #if (APP_MODE == APP_MODE_ANC)
-				/* Quiet once ANC has run for ANC_PRINTS_AFTER_START prints: JTAG printf halts the core -> clicks */
-				if (ANC_Is_Running())
+				/* Tripped and still fading out: a JTAG halt now would freeze y (the DMA replays its last buffers) */
+				if (ANC_Trip_Pending())
+				{
+					continue;
+				}
+				/* Quiet once ANC has run for ANC_PRINTS_AFTER_START prints: JTAG printf halts the core -> clicks.
+				 * After a divergence trip the speaker is muted, so printing resumes */
+				if (ANC_Is_Running() && !tripPrinted)
 				{
 					if ((ANC_PRINTS_AFTER_START >= 0) && (runPrints >= ANC_PRINTS_AFTER_START))
 					{
@@ -1592,7 +1627,7 @@ int main(int argc, char *argv[])
 					ANC_Get_Status(&st);
 					/* Fields are explained at ENABLE_ANC_STATUS */
 					printf("[ANC #%u] %s t=%+.1f s  ref=%.1f err=%.1f dB  Px'=%.2e  y_pk=%.3f clip=%u/%u  W2=%.3e\n",
-						   lastCount, st.running ? "run " : "wait", st.seconds,
+						   lastCount, st.tripped ? "trip" : (st.running ? "run " : "wait"), st.seconds,
 						   10.0f * log10f(st.ref_ms + 1e-30f), 10.0f * log10f(st.err_ms + 1e-30f),
 						   st.p_x, st.y_peak, st.clipped, st.samples, st.w_energy);
 					fflush(stdout);

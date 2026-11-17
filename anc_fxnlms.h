@@ -55,6 +55,42 @@
 #define ANC_START_DELAY_S   15u      // 開機後 ANC 先關閉這麼多秒 (y = 0、W 不更新，功率估計照常)，
                                      // 同一段錄音前段是關、後段是開；也留時間離開出風口前方
 
+// 發散保護: ANC 啟動後，限幅前 |y| 超過 ANC_SAFE_OUTPUT_LIMIT 的取樣比例 (指數平均，時間常數 ANC_TRIP_TAU_S)
+// 超過 ANC_TRIP_CLIP_FRACTION，或 y 變成 NaN，就判定發散:
+//   - 喇叭輸出在 ANC_TRIP_FADE_MS 內淡出到 0 (直接切 0 會爆音)，之後一直是 0，重開機才會再跑 ANC
+//   - W 停止更新，保留判定當時的值 (可用除錯器讀 w_coeffs)
+//   - main loop 印 [ANC TRIP]: 啟動後幾秒、截斷比例、限幅前 |y| 的峰值、y 的頻率 (過零率估計)。過零率的平均
+//     在 ANC 啟動時從 0 起算，除以同樣平均的 1 補正；否則啟動後不久就判定會偏低 (模擬: 0.4 s 判定的
+//     1130 Hz 會印成 904 Hz；最快的 0.17 s 判定只剩一半)
+//   - log 等淡出完、輸出再維持 0 ANC_TRIP_QUIET_MS 之後才印，這段期間狀態列也不印: JTAG printf 會讓核心暫停，
+//     DMA 重播最後幾個緩衝，輸出卡在當時的值。2026-11-17 自我測試 (J18 R 錄音) 在判定當下就印，輸出卡在
+//     限幅值 0.5 s，淡出延到暫停之後
+// 起因: 2026-11-16 開機測試後 CCES_runner 結束，核心繼續跑，ANC 在沒人看著、風扇關的情況下發散，
+// 喇叭持續發出中音並破音，直到板子斷電
+// 門檻 (2026-11-16 模擬): 400-1500 Hz 正常約需 y 0.24，不會截斷；400-5000 Hz 在 100% duty 的兩音 0.24 + 0.92
+// 截斷比例 0.20，3.6 kHz 加到 1.10 也只有 0.34。發散的單音撞到限幅後 0.3-0.8 s 判定
+#define ANC_TRIP_CLIP_FRACTION  0.5f
+#define ANC_TRIP_TAU_S          0.25f
+#define ANC_TRIP_FADE_MS        5u
+#define ANC_TRIP_QUIET_MS       10u      // 升頻濾波器拖尾約 1 ms、DMA 緩衝 4 個取樣，這個值留足餘裕
+
+typedef enum
+{
+    ANC_TRIP_NONE = 0,
+    ANC_TRIP_CLIP,      // 持續截斷
+    ANC_TRIP_NAN        // y 變成 NaN (W 已經壞了)
+} ANC_Trip_Reason;
+
+// 判定發散當時的數值 (ANC_Get_Trip)
+typedef struct
+{
+    ANC_Trip_Reason reason;
+    float seconds;      // ANC 啟動後幾秒判定
+    float clip_frac;    // 平滑後的截斷比例
+    float y_peak;       // 限幅前 |y| 的峰值 (以 ANC_TRIP_TAU_S 衰減)
+    float freq_hz;      // 限幅前 y 的過零率換算的頻率 (發散時 y 幾乎是單音)
+} ANC_Trip;
+
 // TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):
 //     - J18    (絲印 DAC 3/4, SPORT Slot 0/1): 左喇叭靜音(0), 右喇叭輸出抗噪波 y(n)
 //       (y 送出時不另外反相: Ŝ 量測時 y 的極性與此相同，W 以梯度下降自己學成與噪音反相)
@@ -66,6 +102,7 @@
 // ANC 狀態，main loop 每 ~2 s 讀一次並印出 (Audio_Talkthrough_I2S.c 的 ENABLE_ANC_STATUS)
 typedef struct
 {
+    bool     tripped;   // 發散保護已判定，喇叭靜音 (ANC_TRIP_*)
     bool     running;   // false: 還在 ANC_START_DELAY_S 的等待期間 (y = 0)
     float    seconds;   // 啟動後的秒數 (等待中為負值: 距離啟動還有幾秒)
     uint32_t samples;   // 這段期間的核心取樣數
@@ -82,5 +119,7 @@ void ANC_Init(void);
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count);  // count 須為 4 * ANC_DECIM 的倍數
 bool ANC_Is_Running(void);              // ANC_START_DELAY_S 過了沒
 void ANC_Get_Status(ANC_Status *st);    // 讀出並清除這段期間的統計 (main loop 呼叫，非中斷)
+bool ANC_Get_Trip(ANC_Trip *t);         // 已判定發散且輸出已靜音時回傳 true，並填入判定當時的數值 (main loop 呼叫)
+bool ANC_Trip_Pending(void);            // 已判定、輸出還沒靜音 (淡出中): 這時不要 printf
 
 #endif /* _ANC_FXNLMS_H_ */
