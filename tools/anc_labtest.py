@@ -517,10 +517,10 @@ def report_bars(plt, runs, labels, names, path, title):
 
 
 def report_spectrum(plt, runs, labels, path):
-    from matplotlib.ticker import FixedFormatter, FixedLocator, NullLocator
+    from matplotlib.ticker import FixedFormatter, FixedLocator, MultipleLocator, NullLocator
     n = len(runs)
-    fig, axs = plt.subplots(2, n, figsize=(13.2, 6.6), sharex=True, sharey='row', squeeze=False,
-                            gridspec_kw={'height_ratios': [1.9, 1]})
+    fig, axs = plt.subplots(2, n, figsize=(13.2, 5.2), sharex=True, sharey='row', squeeze=False,   # slide + 3 bullets
+                            gridspec_kw={'height_ratios': [1.8, 1]})
     for j, (m, lab) in enumerate(zip(runs, labels)):
         f, p_off, p_on = m['f'], m['spec']['ANC off'], m['spec'][m['on_key']]
         sel = (f >= 60) & (f <= 20000)
@@ -549,8 +549,8 @@ def report_spectrum(plt, runs, labels, path):
         bot.fill_between(fc, 0, d, color=C_RUN[j], alpha=0.18, lw=0)
         bot.plot(fc, d, color=C_RUN[j], lw=1.5)
         bot.axhline(0, color='#888888', lw=0.8)
-        bot.text(0.99, 0.97, f'1/{SMOOTH_OCT} octave', transform=bot.transAxes, ha='right', va='top', fontsize=11,
-                 color='#666666')
+        bot.text(0.99, 0.97, f'1/{SMOOTH_OCT} octave, above 0 = quieter', transform=bot.transAxes, ha='right',
+                 va='top', fontsize=11, color='#666666')
         bot.set_xlabel('Hz')
     ax = axs[1, 0]
     ax.set_xscale('log')
@@ -558,8 +558,9 @@ def report_spectrum(plt, runs, labels, path):
     ax.xaxis.set_major_locator(FixedLocator(SPEC_TICKS))
     ax.xaxis.set_major_formatter(FixedFormatter([f'{t // 1000}k' if t >= 1000 else str(t) for t in SPEC_TICKS]))
     ax.xaxis.set_minor_locator(NullLocator())
+    axs[0, 0].yaxis.set_major_locator(MultipleLocator(10))
     axs[0, 0].set_ylabel('Err PSD (dB re FS²/Hz)')
-    axs[1, 0].set_ylabel('off - on (dB)\nabove 0 = quieter')
+    axs[1, 0].set_ylabel('off - on (dB)')
     fig.tight_layout()
     fig.savefig(path, dpi=100)
     plt.close(fig)
