@@ -162,6 +162,8 @@ to the terms of the associated Analog Devices License Agreement.
 #define ENABLE_ANC_STATUS       1
 #define ANC_PRINTS_AFTER_START  0     /* 2026-11-17: no prints while ANC runs (5 gave ~10 s of status, a click each) */
 #define ANC_STATUS_ON           (ENABLE_ANC_STATUS && (APP_MODE == APP_MODE_ANC))
+/* ANC_DIAG (anc_fxnlms.h): after a divergence trip, Diag_Report prints the status history and writes the snapshot */
+#define ANC_DIAG_REPORT         (ANC_DIAG && (APP_MODE == APP_MODE_ANC))
 
 /* DMA timing probe (diagnostic, any APP_MODE). Records the TX (SPORT 4A = DMA10) and RX (SPORT 4B = DMA11) DMA positions:
  *   - start-up trace, logged on every change: from the TX DMA submit (SPORTs still off) until the first RX blocks are in.
@@ -356,7 +358,7 @@ static void Update_Adc_Capture(const int *pIn)
 }
 #endif
 
-#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE
+#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE || ANC_DIAG_REPORT
 /* Host PC path of a repo-relative file written over JTAG: this source file's folder + rel. CCES compiles linked
  * sources by absolute path, so __FILE__ holds the repo folder of whichever PC built it. */
 static const char *Host_Path(const char *rel)
@@ -370,6 +372,54 @@ static const char *Host_Path(const char *rel)
 	}
 	snprintf(path, sizeof(path), "%.*s%s", (int)n, src, rel);
 	return path;
+}
+#endif
+
+#if ANC_DIAG_REPORT
+/* Divergence diagnostics (ANC_DIAG, anc_fxnlms.h), once after a trip. The output is 0 by then, so the JTAG halts of
+ * printf and the file write are silent. The status history goes to the console; the last ANC_DIAG_SNAP core samples
+ * before the trip go to ANC_DIAG_FILE, one line per sample: x, F^y, u, y before the clamp, e (full scale = 1). */
+static void Diag_Report(void)
+{
+	const ANC_Diag_Rec *ring;
+	const float *sig;
+	const char *path;
+	FILE *fp;
+	uint32_t n = ANC_Diag_History(&ring);
+	uint32_t i, oldest, ns;
+
+	printf("[DIAG] status every %u ms up to the trip, dB re full scale: x = Ref, Fy = feedback estimate, u = into W, "
+		   "y = after the clamp, e = Err\n", ANC_DIAG_TICK_MS);
+	for (i = (n > ANC_DIAG_HIST) ? (n - ANC_DIAG_HIST) : 0u; i < n; i++)
+	{
+		const ANC_Diag_Rec *r = &ring[i % ANC_DIAG_HIST];
+		printf("[DIAG] t=%6.2f y_pk=%6.3f clip=%4.2f x=%6.1f Fy=%6.1f u=%6.1f y=%6.1f e=%6.1f W2=%.3e\n",
+			   r->t, r->y_pk, r->clip, 10.0f * log10f(r->x_ms + 1e-30f), 10.0f * log10f(r->fy_ms + 1e-30f),
+			   10.0f * log10f(r->u_ms + 1e-30f), 10.0f * log10f(r->y_ms + 1e-30f), 10.0f * log10f(r->e_ms + 1e-30f),
+			   r->w2);
+	}
+	ns = ANC_Diag_Snapshot(&sig, &oldest);
+	path = Host_Path(ANC_DIAG_FILE);
+	printf("[DIAG] writing the last %u samples before the trip to %s\n", ns, path);
+	fflush(stdout);
+	fp = fopen(path, "w");
+	if (fp == NULL)
+	{
+		printf("[DIAG] fopen failed: does the folder exist?\n");
+		fflush(stdout);
+		return;
+	}
+	fprintf(fp, "# ANC_DIAG snapshot: the last %u ANC core samples (48 kHz) before the divergence trip\n", ns);
+	fprintf(fp, "# columns: x (Ref), Fy (feedback estimate), u (into W), y (before the clamp), e (Err); full scale = 1\n");
+	for (i = 0u; i < ns; i++)
+	{
+		uint32_t j = (oldest + i) % ANC_DIAG_SNAP;
+		fprintf(fp, "%.6e %.6e %.6e %.6e %.6e\n", sig[j], sig[ANC_DIAG_SNAP + j], sig[2u * ANC_DIAG_SNAP + j],
+				sig[3u * ANC_DIAG_SNAP + j], sig[4u * ANC_DIAG_SNAP + j]);
+	}
+	fclose(fp);
+	printf("[DIAG] snapshot written\n");
+	fflush(stdout);
 }
 #endif
 
@@ -1426,6 +1476,10 @@ int main(int argc, char *argv[])
 #if (ANC_PRINTS_AFTER_START == 0)
 		printf(">>> No status prints while ANC runs (JTAG printf would freeze the output), back after a trip\n");
 #endif
+#if ANC_DIAG_REPORT
+		printf(">>> Diagnostics: after a trip, status every %u ms and the last %u samples (%s)\n",
+			   ANC_DIAG_TICK_MS, ANC_DIAG_SNAP, ANC_DIAG_FILE);
+#endif
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
 		printf(">>> Output Jack J4/J17: Left = Err Mic, Right = Ref Mic\n");
 #elif (APP_MODE == APP_MODE_PATH_MEASURE)
@@ -1573,6 +1627,9 @@ int main(int argc, char *argv[])
 					}
 					printf("[ANC TRIP] Speaker muted (y = 0), W frozen. Reboot to run ANC again.\n\n");
 					fflush(stdout);
+#if ANC_DIAG_REPORT
+					Diag_Report();
+#endif
 					tripPrinted = 1;
 				}
 			}

@@ -79,9 +79,56 @@ static volatile uint32_t quiet_samples = 0u;   // 淡出完後的取樣數 (數�
 static volatile ANC_Trip_Reason trip_reason = ANC_TRIP_NONE;
 static volatile float trip_seconds = 0.0f, trip_clip = 0.0f, trip_peak = 0.0f, trip_hz = 0.0f;
 
+#if ANC_DIAG
+// 診斷紀錄 (anc_fxnlms.h 的 ANC_DIAG): ANC 運轉中在中斷裡記錄，判定發散時凍結。放 L2，L1 留給延遲線與係數
+#define ANC_DIAG_TICK ((ANC_DIAG_TICK_MS * ANC_CORE_FS) / 1000u)   // 每筆的核心取樣數
+#pragma section("seg_l2_bsz_data", ZERO_INIT)
+static float diag_snap[ANC_DIAG_SIGNALS * ANC_DIAG_SNAP];   // 訊號 s 的第 j 個在 [s * ANC_DIAG_SNAP + j]
+#pragma section("seg_l2_bsz_data", ZERO_INIT)
+static ANC_Diag_Rec diag_hist[ANC_DIAG_HIST];
+static volatile uint32_t diag_snap_idx = 0u, diag_snap_n = 0u;   // 下一個寫入位置、有效取樣數 (最多 ANC_DIAG_SNAP)
+static volatile uint32_t diag_hist_n = 0u;                       // 已記錄的筆數
+static uint32_t dg_n = 0u, dg_clip = 0u;                         // 這一筆的取樣數、被限幅的取樣數
+static float dg_ypk = 0.0f, dg_x = 0.0f, dg_fy = 0.0f, dg_u = 0.0f, dg_y = 0.0f, dg_e = 0.0f;
+
+/** @brief 結束目前這一筆 (每 ANC_DIAG_TICK 個取樣，或判定發散時)。W2 的 2048 次乘加只在這裡做，每 0.25 s 一次 */
+static void diag_store(void)
+{
+    ANC_Diag_Rec *r = &diag_hist[diag_hist_n % ANC_DIAG_HIST];
+    float n = (dg_n > 0u) ? (float)dg_n : 1.0f;
+    float w2 = 0.0f;
+    int j;
+    for (j = 0; j < ANC_W_TAPS; j++)
+    {
+        w2 += w_coeffs[j] * w_coeffs[j];
+    }
+    r->t     = (float)run_samples / (float)ANC_CORE_FS;
+    r->y_pk  = dg_ypk;
+    r->clip  = (float)dg_clip / n;
+    r->x_ms  = dg_x / n;
+    r->fy_ms = dg_fy / n;
+    r->u_ms  = dg_u / n;
+    r->y_ms  = dg_y / n;
+    r->e_ms  = dg_e / n;
+    r->w2    = w2;
+    diag_hist_n++;
+    dg_n    = 0u;
+    dg_clip = 0u;
+    dg_ypk  = 0.0f;
+    dg_x    = 0.0f;
+    dg_fy   = 0.0f;
+    dg_u    = 0.0f;
+    dg_y    = 0.0f;
+    dg_e    = 0.0f;
+}
+#endif
+
 /** @brief 判定發散，記下當時的數值。trip_reason 最後寫：main loop 看到它時，其他欄位已經寫好 */
 static void anc_trip(ANC_Trip_Reason reason)
 {
+#if ANC_DIAG
+    if (dg_n > 0u) diag_store();   // 判定前不滿一筆的最後一段
+#endif
     trip_seconds = (float)run_samples / (float)ANC_CORE_FS;
     trip_clip    = clip_avg;
     trip_peak    = y_hold;
@@ -138,6 +185,19 @@ void ANC_Init(void)
     out_gain     = 1.0f;
     quiet_samples = 0u;
     trip_reason  = ANC_TRIP_NONE;
+#if ANC_DIAG
+    diag_snap_idx = 0u;
+    diag_snap_n   = 0u;
+    diag_hist_n   = 0u;
+    dg_n    = 0u;
+    dg_clip = 0u;
+    dg_ypk  = 0.0f;
+    dg_x    = 0.0f;
+    dg_fy   = 0.0f;
+    dg_u    = 0.0f;
+    dg_y    = 0.0f;
+    dg_e    = 0.0f;
+#endif
 }
 
 /**
@@ -246,6 +306,19 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             y_n = 0.0f;
             if (trip_reason == ANC_TRIP_NONE) anc_trip(ANC_TRIP_NAN);
         }
+#if ANC_DIAG
+        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE))   // 快照: ANC 運轉中一直覆寫，判定後凍結
+        {
+            uint32_t j = diag_snap_idx;
+            diag_snap[0u * ANC_DIAG_SNAP + j] = x_n;       // 參考麥 (回授中和前)
+            diag_snap[1u * ANC_DIAG_SNAP + j] = f_leak;    // 回授估計 F̂y
+            diag_snap[2u * ANC_DIAG_SNAP + j] = u_hat_n;   // 帶通後、送進 W 的參考
+            diag_snap[3u * ANC_DIAG_SNAP + j] = y_n;       // 限幅前的 y
+            diag_snap[4u * ANC_DIAG_SNAP + j] = d_n;       // 誤差麥
+            diag_snap_idx = (j + 1u < ANC_DIAG_SNAP) ? (j + 1u) : 0u;
+            if (diag_snap_n < ANC_DIAG_SNAP) diag_snap_n++;
+        }
+#endif
         float y_abs = (y_n < 0.0f) ? -y_n : y_n;
         if (y_abs > y_peak) y_peak = y_abs;
         bool clipped = (y_abs > ANC_SAFE_OUTPUT_LIMIT);
@@ -254,6 +327,20 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             y_n = (y_n > 0.0f) ? ANC_SAFE_OUTPUT_LIMIT : -ANC_SAFE_OUTPUT_LIMIT;
             n_clip++;
         }
+#if ANC_DIAG
+        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE))   // 每 ANC_DIAG_TICK_MS 一筆的統計
+        {
+            dg_n++;
+            if (clipped) dg_clip++;
+            if (y_abs > dg_ypk) dg_ypk = y_abs;
+            dg_x  += x_n * x_n;
+            dg_fy += f_leak * f_leak;
+            dg_u  += u_hat_n * u_hat_n;
+            dg_y  += y_n * y_n;   // 限幅後
+            dg_e  += d_n * d_n;
+            if (dg_n >= ANC_DIAG_TICK) diag_store();
+        }
+#endif
 
         // 4b. 發散保護 (anc_fxnlms.h 的 ANC_TRIP_*): ANC 啟動後追蹤截斷比例、過零率與 |y| 峰值；判定後 y 淡出到 0
         if ((trip_reason == ANC_TRIP_NONE) && (wait_samples == 0u))
@@ -406,3 +493,20 @@ bool ANC_Trip_Pending(void)
 {
     return (trip_reason != ANC_TRIP_NONE) && (quiet_samples < ANC_TRIP_QUIET_SAMPLES);
 }
+
+#if ANC_DIAG
+/** @brief 診斷紀錄的狀態歷史 (main loop 在判定、輸出歸零後讀；那時中斷已經不再寫入) */
+uint32_t ANC_Diag_History(const ANC_Diag_Rec **ring)
+{
+    *ring = diag_hist;
+    return diag_hist_n;
+}
+
+/** @brief 判定前最後 ANC_DIAG_SNAP 個核心取樣的快照 */
+uint32_t ANC_Diag_Snapshot(const float **sig, uint32_t *oldest)
+{
+    *sig    = diag_snap;
+    *oldest = (diag_snap_n < ANC_DIAG_SNAP) ? 0u : diag_snap_idx;
+    return diag_snap_n;
+}
+#endif

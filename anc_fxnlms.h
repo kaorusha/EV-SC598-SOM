@@ -114,6 +114,33 @@ typedef struct
     float    w_energy;  // sum w^2 (持續變大 = 發散)
 } ANC_Status;
 
+// 診斷紀錄 (ANC_DIAG): ANC 運轉時不能 printf (JTAG 暫停會讓輸出卡住)，所以先存在 L2，判定發散、輸出歸零之後
+// 才由 main loop 印出並經 JTAG 寫檔 (Audio_Talkthrough_I2S.c 的 Diag_Report)。沒有判定就不輸出
+//   - 每 ANC_DIAG_TICK_MS 一筆: 限幅前 |y| 的峰值、被限幅的比例、x / F̂y / u / y / e 的均方值、W2，保留最近 ANC_DIAG_HIST 筆
+//   - 最近 ANC_DIAG_SNAP 個核心取樣的 x (參考麥)、F̂y (回授估計)、u (帶通後、送進 W 的參考)、限幅前的 y、e (誤差麥)，
+//     判定時凍結
+// 起因: 2026-11-17 實驗室 400-5000 Hz 實測 17.5 s 後判定 (一半取樣被限幅，約 3573 Hz)，誤差麥上卻看不到任何頻率
+// 變大。要看到 y 本身，才分得出是輸出不夠 (W 越加越大) 還是 y 裡有誤差麥聽不到的成分
+#define ANC_DIAG             1
+#define ANC_DIAG_TICK_MS     250u
+#define ANC_DIAG_HIST        128u     // 32 s
+#define ANC_DIAG_SNAP        8192u    // 171 ms
+#define ANC_DIAG_SIGNALS     5u       // x, F̂y, u, 限幅前的 y, e
+#define ANC_DIAG_FILE        "measurements/anc_diag/anc_diag_snapshot.txt"   // repo 相對路徑 (Host_Path)，資料夾要先建好
+
+typedef struct
+{
+    float t;        // 這一筆結束時，ANC 啟動後的秒數
+    float y_pk;     // 限幅前 |y| 的最大值
+    float clip;     // 被限幅的取樣比例
+    float x_ms;     // 參考麥 (回授中和前) 的均方值
+    float fy_ms;    // 回授估計 F̂y 的均方值
+    float u_ms;     // 帶通後、送進 W 的參考的均方值
+    float y_ms;     // 限幅後 y 的均方值
+    float e_ms;     // 誤差麥的均方值
+    float w2;       // 這一筆結束時的 sum w^2
+} ANC_Diag_Rec;
+
 // 對外 API 函式宣告
 void ANC_Init(void);
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count);  // count 須為 4 * ANC_DECIM 的倍數
@@ -121,5 +148,10 @@ bool ANC_Is_Running(void);              // ANC_START_DELAY_S 過了沒
 void ANC_Get_Status(ANC_Status *st);    // 讀出並清除這段期間的統計 (main loop 呼叫，非中斷)
 bool ANC_Get_Trip(ANC_Trip *t);         // 已判定發散且輸出已靜音時回傳 true，並填入判定當時的數值 (main loop 呼叫)
 bool ANC_Trip_Pending(void);            // 已判定、輸出還沒靜音 (淡出中): 這時不要 printf
+#if ANC_DIAG
+uint32_t ANC_Diag_History(const ANC_Diag_Rec **ring);             // 已記錄的筆數；第 i 筆在 ring[i % ANC_DIAG_HIST]
+uint32_t ANC_Diag_Snapshot(const float **sig, uint32_t *oldest);  // 快照的有效取樣數；訊號 s 的第 j 個在
+                                                                  // sig[s * ANC_DIAG_SNAP + j]，最舊的在 j = oldest
+#endif
 
 #endif /* _ANC_FXNLMS_H_ */
