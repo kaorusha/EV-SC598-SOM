@@ -12,6 +12,8 @@ that load and switch it on before ANC starts (ANC_START_DELAY_S after boot). A r
   python tools/anc_labtest.py check                      silent: build time, US205, Windows volume, input level now
   python tools/anc_labtest.py run --name "1117 ANC fan100 band400-1500" [--timeout 100] [--notes "..."] [--cces DIR]
   python tools/anc_labtest.py analyze <wav> [--f0 HZ]    again, from the saved files
+  python tools/anc_labtest.py report <wav> [<wav> ...] [--labels ...] [--out DIR] [--name PREFIX]
+                                                         slide figures for 1-3 runs (below)
   python tools/anc_labtest.py diag <wav>                 ANC_DIAG output after a divergence trip ([DIAG] lines, snapshot)
   python tools/anc_labtest.py synth <wav>                synthetic recording to test the analysis
 
@@ -27,6 +29,12 @@ status print froze J17 L (a JTAG printf halts the core and the SPORT DMA repeats
 off - on in dB (above 0 = quieter) for the fan tones f0, 2 f0, 5 f0, 6 f0 (power within +-6 Hz), 400-560 Hz,
 7-12 kHz and the total 60 Hz-20 kHz. When the divergence guard tripped ("[ANC TRIP] Diverged ... s after ANC started"
 in the log), ANC on ends 0.5 s before the trip, since the guard muted the speaker there.
+
+Report slides show each result twice: as bars (easy to read) and as the Err spectrum with ANC off and on (where the
+change is, including what got louder). "report" writes both, plus the attenuation over time, for up to 3 runs side
+by side, e.g. for the 11/17 band-pass comparison:
+  python tools/anc_labtest.py report "measurements/anc_test/1117 ANC fan100 band400-1500 labS.wav"
+      "measurements/anc_test/1117 ANC fan100 band400-5000 labS diag.wav" --name "1117 band 400-1500 vs 400-5000"
 """
 import argparse
 import json
@@ -394,6 +402,202 @@ def plot(base, m):
     plt.close(fig)
 
 
+# ---------------------------------------------------------------- slide figures
+
+C_RUN = ('#2a6fdb', '#e8702a', '#5b2c83')    # runs in this fixed order; OKLab CVD checks pass for every pair and C_OFF
+C_TIME = {'f0': '#159a85', '6 f0': '#8e44ad', '7-12 kHz': '#b07d12', 'total': '#3d3d3d'}
+SLIDE_RC = {'font.size': 15, 'axes.edgecolor': '#999999', 'axes.labelcolor': INK, 'xtick.color': INK,
+            'ytick.color': INK, 'axes.titlelocation': 'left', 'axes.titlesize': 16}
+SPEC_TICKS = (100, 200, 500, 1000, 2000, 5000, 10000, 20000)
+SMOOTH_OCT = 24                              # off - on panel of the spectrum figure: 1/24-octave bands
+
+
+def slide_names(f0):
+    """Names of COMPONENTS on the slides: '600 Hz (f0)', '3.6 kHz (6 f0)', '7-12 kHz band', 'total'."""
+    def hz(v):
+        return f'{round(v, -1):.0f} Hz' if v < 1000 else f'{v / 1000:.1f} kHz'
+    return {q: f'{hz((int(q.split()[0]) if " " in q else 1) * f0)} ({q})' if 'f0' in q
+            else (q if q == 'total' else f'{q} band') for q in COMPONENTS}
+
+
+def panel_title(ax, label, n):
+    """Run label over one of n side-by-side panels, wrapped so that neighbouring titles do not overlap."""
+    import textwrap
+    ax.set_title(textwrap.fill(label, 60 // n), fontsize=16 if n < 3 else 13)
+
+
+def octave_avg(f, p, frac=SMOOTH_OCT, lo=60.0, hi=20000.0):
+    """Mean PSD over 1/frac-octave bands, centred on a 1/(2 frac)-octave grid from lo to hi Hz."""
+    fc = lo * 2 ** (np.arange(int(np.log2(hi / lo) * 2 * frac) + 1) / (2 * frac))
+    c = np.concatenate([[0.0], np.cumsum(p)])
+    il = np.searchsorted(f, fc * 2 ** (-0.5 / frac))
+    ih = np.maximum(np.searchsorted(f, fc * 2 ** (0.5 / frac)), il + 1)
+    return fc, (c[ih] - c[il]) / (ih - il)
+
+
+def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
+    """Slide figures for 1-3 runs: <name>_bars.png (attenuation per component), <name>_spectrum.png (Err spectrum,
+    ANC off and on, with off - on per 1/24 octave), <name>_time.png (attenuation over time) and <name>.txt."""
+    if len(wavs) > len(C_RUN):
+        sys.exit(f'At most {len(C_RUN)} runs per figure.')
+    for opt, v in (('--labels', labels), ('--f0', f0s)):
+        if v and len(v) != len(wavs):
+            sys.exit(f'Give one {opt} value per wav.')
+    runs = [measure(w, f0s[i] if f0s else None) for i, w in enumerate(wavs)]
+    for m in runs:
+        if m['on_key'] is None:
+            sys.exit(f'{m["base"].name}: no ANC-on window of 3 s or more (the guard tripped too early).')
+    if not labels:
+        labels = [f'ref band-pass {m["log"]["band"][0]}-{m["log"]["band"][1]} Hz' if m['log']['band']
+                  else m['base'].name for m in runs]
+        if len(set(labels)) < len(labels):
+            labels = [m['base'].name for m in runs]
+    out = Path(out) if out else Path(wavs[0]).resolve().parent
+    out.mkdir(parents=True, exist_ok=True)
+    names = slide_names(float(np.mean([m['f0'] for m in runs])))
+    steady = all(m['on_key'] == 'steady (attached)' for m in runs)
+    L = [f'anc_labtest.py report, {time.strftime("%Y-%m-%d %H:%M")}']
+    for lab, m in zip(labels, runs):
+        a, b = m['win'][m['on_key']]
+        L += [f'{lab}: {m["base"].name}.wav', f'  {m["f0_text"]}',
+              f'  ANC off {m["ta"] - 10.5:.1f}-{m["ta"] - 0.5:.1f} s ({m["nseg"]["ANC off"]} segments of 0.5 s); '
+              f'ANC on = {m["on_key"]} {a:.1f}-{b:.1f} s ({m["nseg"][m["on_key"]]} segments)']
+        if m['t_trip'] is not None:
+            L.append(f'  The guard tripped {m["log"]["trip_s"]:.1f} s after the ANC start; ANC on ends 0.5 s before it.')
+    w = max(len(l) for l in labels)
+    L += ['Attenuation, off - on (dB, above 0 = quieter); tones = power within +-6 Hz:',
+          '  ' + ' ' * w + ''.join(f'{q:>11s}' for q in COMPONENTS)]
+    L += [f'  {lab:{w}s}' + ''.join(f'{m["res"][m["on_key"]][q]:+11.1f}' for q in COMPONENTS)
+          for lab, m in zip(labels, runs)]
+    L.append(f'Spectrum figure: 0.5 s Hann segments (2 Hz); off - on over 1/{SMOOTH_OCT}-octave bands. '
+             'Figures: ' + ', '.join(f'{name}_{k}.png' for k in ('bars', 'spectrum', 'time')))
+    txt = '\n'.join(L)
+    print(txt)
+    (out / f'{name}.txt').write_text(txt + '\n', encoding='utf-8')
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    with plt.rc_context(SLIDE_RC):
+        report_bars(plt, runs, labels, names, out / f'{name}_bars.png',
+                    title or ('Steady state from 10 s after the ANC start (above 0 = quieter)' if steady
+                              else 'ANC on, before the guard trip where there is one (above 0 = quieter)'))
+        report_spectrum(plt, runs, labels, out / f'{name}_spectrum.png')
+        report_time(plt, runs, labels, names, out / f'{name}_time.png')
+    print('Figures in', out)
+
+
+def report_bars(plt, runs, labels, names, path, title):
+    keys = list(COMPONENTS)
+    xs = np.arange(len(keys))
+    n = len(runs)
+    wbar = min(0.5, 0.76 / n)
+    vals = [np.array([m['res'][m['on_key']][q] for q in keys]) for m in runs]
+    fig, ax = plt.subplots(figsize=(13.2, 4.7))
+    for j, (v, lab) in enumerate(zip(vals, labels)):
+        xb = xs + (j - (n - 1) / 2) * wbar
+        ax.bar(xb, v, wbar * 0.94, color=C_RUN[j], label=lab)
+        for xx, vv in zip(xb, v):
+            ax.text(xx, vv + (0.4 if vv >= 0 else -0.4), f'{vv:+.1f}', ha='center', va='bottom' if vv >= 0 else 'top',
+                    fontsize=12.5 if n < 3 else 11, color=INK)
+    ax.axhline(0, color='#888888', lw=0.9)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([names[q].replace(' (', '\n(').replace(' band', '\nband') for q in keys])
+    ax.set_ylabel('Err attenuation, off - on (dB)')
+    lo, hi = min(v.min() for v in vals), max(v.max() for v in vals)
+    ax.set_ylim(min(-8, lo - 2.5), hi + 3)
+    ax.set_title(title)
+    ax.grid(True, axis='y', lw=0.6, color=GRID)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, loc='upper right')
+    for s in ('top', 'right'):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+
+
+def report_spectrum(plt, runs, labels, path):
+    from matplotlib.ticker import FixedFormatter, FixedLocator, NullLocator
+    n = len(runs)
+    fig, axs = plt.subplots(2, n, figsize=(13.2, 6.6), sharex=True, sharey='row', squeeze=False,
+                            gridspec_kw={'height_ratios': [1.9, 1]})
+    for j, (m, lab) in enumerate(zip(runs, labels)):
+        f, p_off, p_on = m['f'], m['spec']['ANC off'], m['spec'][m['on_key']]
+        sel = (f >= 60) & (f <= 20000)
+        top, bot = axs[0, j], axs[1, j]
+        for ax in (top, bot):
+            if m['log']['band']:
+                ax.axvspan(*m['log']['band'], color=INK, alpha=0.06, lw=0)
+            for k in (1, 2, 5, 6):
+                ax.axvline(k * m['f0'], color='#bbbbbb', lw=0.8, ls=':', zorder=0)
+            ax.grid(True, lw=0.5, color=GRID)
+            for s in ('top', 'right'):
+                ax.spines[s].set_visible(False)
+        top.plot(f[sel], 10 * np.log10(p_off[sel] + 1e-30), color=C_OFF, lw=0.9, label='ANC off')
+        top.plot(f[sel], 10 * np.log10(p_on[sel] + 1e-30), color=C_RUN[j], lw=0.9, label='ANC on')
+        for k in (1, 2, 5, 6):          # 6 f0 is labelled right of its line, the others left, so 5 f0 and 6 f0 part
+            top.text(k * m['f0'], 0.99, f'{k} f0' if k > 1 else 'f0', transform=top.get_xaxis_transform(),
+                     rotation=90, ha='left' if k == 6 else 'right', va='top', fontsize=11, color='#666666')
+        if m['log']['band']:
+            top.text(np.sqrt(np.prod(m['log']['band'])), 0.02, 'ref band', transform=top.get_xaxis_transform(),
+                     ha='center', va='bottom', fontsize=11, color='#666666')
+        panel_title(top, lab, n)
+        top.legend(frameon=False, loc='lower left', fontsize=13)
+        fc, a_off = octave_avg(f, p_off)
+        _, a_on = octave_avg(f, p_on)
+        d = 10 * np.log10(a_off / np.maximum(a_on, 1e-30))
+        bot.fill_between(fc, 0, d, color=C_RUN[j], alpha=0.18, lw=0)
+        bot.plot(fc, d, color=C_RUN[j], lw=1.5)
+        bot.axhline(0, color='#888888', lw=0.8)
+        bot.text(0.99, 0.97, f'1/{SMOOTH_OCT} octave', transform=bot.transAxes, ha='right', va='top', fontsize=11,
+                 color='#666666')
+        bot.set_xlabel('Hz')
+    ax = axs[1, 0]
+    ax.set_xscale('log')
+    ax.set_xlim(60, 20000)
+    ax.xaxis.set_major_locator(FixedLocator(SPEC_TICKS))
+    ax.xaxis.set_major_formatter(FixedFormatter([f'{t // 1000}k' if t >= 1000 else str(t) for t in SPEC_TICKS]))
+    ax.xaxis.set_minor_locator(NullLocator())
+    axs[0, 0].set_ylabel('Err PSD (dB re FS²/Hz)')
+    axs[1, 0].set_ylabel('off - on (dB)\nabove 0 = quieter')
+    fig.tight_layout()
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+
+
+def report_time(plt, runs, labels, names, path):
+    n = len(runs)
+    spans = [max(float(m['tt'][-1] - m['tt'][0]), 1.0) if len(m['tt']) else 1.0 for m in runs]
+    fig, axs = plt.subplots(1, n, figsize=(13.2, 4.7), sharey=True, squeeze=False,
+                            gridspec_kw={'width_ratios': spans})
+    lo, hi = -9.0, 24.0
+    for ax, m, lab in zip(axs[0], runs, labels):
+        for q, c in C_TIME.items():
+            v = m['rows'][q]
+            ax.plot(m['tt'], v, color=c, lw=1.8 if q != 'total' else 1.4, label=names[q])
+            if len(v):
+                lo, hi = min(lo, float(v.min()) - 2), max(hi, float(v.max()) + 2)
+        ax.axvline(0, color='#555555', lw=0.9, ls='--')
+        ax.text(0.5, 0.97, ' ANC on', transform=ax.get_xaxis_transform(), va='top', fontsize=13, color='#444444')
+        if m['t_trip'] is not None:
+            t = m['t_trip'] - m['ta']
+            ax.axvline(t, color=C_TRIP, lw=0.9, ls='--')
+            ax.text(t, 0.97, ' guard trip', transform=ax.get_xaxis_transform(), va='top', fontsize=13, color='#444444')
+        ax.axhline(0, color='#888888', lw=0.8)
+        panel_title(ax, lab, n)
+        ax.set_xlabel('time from the ANC start (s)')
+        ax.grid(True, lw=0.6, color=GRID)
+        for s in ('top', 'right'):
+            ax.spines[s].set_visible(False)
+    axs[0, 0].set_ylabel('Err attenuation, off - on (dB)')
+    axs[0, 0].set_ylim(lo, hi)
+    h, l = axs[0, 0].get_legend_handles_labels()
+    fig.legend(h, l, loc='lower center', ncol=4, frameon=False, fontsize=14)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------- ANC_DIAG output
 
 DIAG_RE = re.compile(r'\[DIAG\] t=\s*([-\d.]+) y_pk=\s*([-\d.]+) clip=\s*([-\d.]+) x=\s*([-\d.]+) Fy=\s*([-\d.]+) '
@@ -533,6 +737,13 @@ def main():
     z = sub.add_parser('analyze')
     z.add_argument('wav')
     z.add_argument('--f0', type=float, help='fan f0 in Hz (default: the strongest peak in 560-640 Hz)')
+    p = sub.add_parser('report', help='slide figures: bars, Err spectrum off/on, time course')
+    p.add_argument('wav', nargs='+', help='1-3 runs, compared in this order')
+    p.add_argument('--labels', nargs='+', help='one per wav (default: "ref band-pass <band>" from the log)')
+    p.add_argument('--f0', type=float, nargs='+', help='fan f0 in Hz, one per wav (default: found per run)')
+    p.add_argument('--out', help='folder for the figures (default: the folder of the first wav)')
+    p.add_argument('--name', default='anc_lab', help='file prefix: <name>_bars.png, _spectrum.png, _time.png, .txt')
+    p.add_argument('--title', help='title of the bar chart')
     d = sub.add_parser('diag')
     d.add_argument('wav')
     s = sub.add_parser('synth')
@@ -545,6 +756,8 @@ def main():
         run(a)
     elif a.cmd == 'analyze':
         analyze(a.wav, a.f0)
+    elif a.cmd == 'report':
+        report(a.wav, a.labels, a.f0, a.out, a.name, a.title)
     elif a.cmd == 'diag':
         diag(a.wav)
     else:
