@@ -388,27 +388,60 @@ static void Diag_Report(void)
 	FILE *fp;
 	uint32_t n = ANC_Diag_History(&ring);
 	uint32_t i, oldest, ns;
+	/* Every JTAG console or file call halts the core for about 0.3-0.4 s (test 0, 2026-11-18: the 128 history lines
+	 * took 54 s, and the snapshot file wrote 1.9 KB/s through the default stdio buffer, about 5 min in all). So the
+	 * history goes out as one block and the file gets a large buffer. Both fall back to the slow path without heap. */
+	size_t hcap = (size_t)ANC_DIAG_HIST * 160u, hlen = 0u, iosize = 32768u;
+	char *hist = (char *)malloc(hcap);
+	char *iobuf = (char *)malloc(iosize);
+	char line[200];
 
+	if (iobuf == NULL)
+	{
+		iosize = 8192u;
+		iobuf = (char *)malloc(iosize);
+	}
 	printf("[DIAG] status every %u ms up to the trip or switch-off, dB re full scale: x = Ref, Fy = feedback estimate, "
 		   "u = into W, y = after the clamp, e = Err\n", ANC_DIAG_TICK_MS);
 	for (i = (n > ANC_DIAG_HIST) ? (n - ANC_DIAG_HIST) : 0u; i < n; i++)
 	{
 		const ANC_Diag_Rec *r = &ring[i % ANC_DIAG_HIST];
-		printf("[DIAG] t=%6.2f y_pk=%6.3f clip=%4.2f x=%6.1f Fy=%6.1f u=%6.1f y=%6.1f e=%6.1f W2=%.3e\n",
-			   r->t, r->y_pk, r->clip, 10.0f * log10f(r->x_ms + 1e-30f), 10.0f * log10f(r->fy_ms + 1e-30f),
-			   10.0f * log10f(r->u_ms + 1e-30f), 10.0f * log10f(r->y_ms + 1e-30f), 10.0f * log10f(r->e_ms + 1e-30f),
-			   r->w2);
+		int k = snprintf(line, sizeof(line),
+						 "[DIAG] t=%6.2f y_pk=%6.3f clip=%4.2f x=%6.1f Fy=%6.1f u=%6.1f y=%6.1f e=%6.1f W2=%.3e\n",
+						 r->t, r->y_pk, r->clip, 10.0f * log10f(r->x_ms + 1e-30f), 10.0f * log10f(r->fy_ms + 1e-30f),
+						 10.0f * log10f(r->u_ms + 1e-30f), 10.0f * log10f(r->y_ms + 1e-30f),
+						 10.0f * log10f(r->e_ms + 1e-30f), r->w2);
+		if ((hist != NULL) && (k > 0) && (hlen + (size_t)k < hcap))
+		{
+			memcpy(hist + hlen, line, (size_t)k);
+			hlen += (size_t)k;
+		}
+		else
+		{
+			fputs(line, stdout);
+		}
+	}
+	if (hist != NULL)
+	{
+		fwrite(hist, 1u, hlen, stdout);
+		free(hist);
 	}
 	ns = ANC_Diag_Snapshot(&sig, &oldest);
 	path = Host_Path(ANC_DIAG_FILE);
-	printf("[DIAG] writing the last %u samples before the trip or switch-off to %s\n", ns, path);
+	printf("[DIAG] writing the last %u samples before the trip or switch-off to %s (buffer %u bytes)\n", ns, path,
+		   (iobuf != NULL) ? (unsigned)iosize : 0u);
 	fflush(stdout);
 	fp = fopen(path, "w");
 	if (fp == NULL)
 	{
 		printf("[DIAG] fopen failed: does the folder exist?\n");
 		fflush(stdout);
+		free(iobuf);
 		return;
+	}
+	if (iobuf != NULL)
+	{
+		setvbuf(fp, iobuf, _IOFBF, iosize);
 	}
 	fprintf(fp, "# ANC_DIAG snapshot: the last %u ANC core samples (48 kHz) before the divergence trip or the "
 			"timed switch-off\n", ns);
@@ -420,6 +453,7 @@ static void Diag_Report(void)
 				sig[3u * ANC_DIAG_SNAP + j], sig[4u * ANC_DIAG_SNAP + j]);
 	}
 	fclose(fp);
+	free(iobuf);   /* only after fclose: the stream used it */
 	printf("[DIAG] snapshot written\n");
 	fflush(stdout);
 }
