@@ -24,13 +24,16 @@ Data go to measurements/anc_test/ (gitignored): "<name>".wav (mono float32), .lo
 notes, devices, Windows volumes, firmware source state), .txt and .png (analysis), and "<name> snapshot.txt" when
 the ANC_DIAG build wrote one after a trip (anc_fxnlms.h ANC_DIAG_FILE).
 
-Analysis: ANC off is the 10 s before the ANC start (runner start + ANC_AFTER_RUNNER), without the stretches where a
-status print froze J17 L (a JTAG printf halts the core and the SPORT DMA repeats its last buffers). Attenuation is
+Analysis: the ANC start comes from the recording. During the ANC_START_DELAY_S wait the firmware prints a status line
+every 2 s ("[ANC #n] wait t=-1.0 s ..."), and each print freezes J17 L for about 0.4 s (a JTAG printf halts the core
+and the SPORT DMA repeats its last buffers). ANC starts |t| of the last such line after its freeze ends (see
+find_anc_start). Without the freezes (fan off: Err too quiet) it falls back to runner start + ANC_AFTER_RUNNER, which
+depends on the build. ANC off is the 10 s before the ANC start, without the frozen stretches. Attenuation is
 off - on in dB (above 0 = quieter) for the fan tones f0, 2 f0, 5 f0, 6 f0 (power within +-6 Hz), 400-560 Hz,
 7-12 kHz and the total 60 Hz-20 kHz. When the divergence guard tripped ("[ANC TRIP] Diverged ... s after ANC started"
 in the log), ANC on ends 0.5 s before the trip, since the guard muted the speaker there. A timed switch-off
 (ANC_AUTO_OFF_S, "[ANC OFF] Output switched off ... s after ANC started") ends it the same way. With ANC_AUTO_OFF_S,
-give run a --timeout that covers the ANC start (about 28 s after the runner start), ANC_AUTO_OFF_S and the
+give run a --timeout that covers the ANC start (about 31 s after the runner start), ANC_AUTO_OFF_S and the
 diagnostics dump that follows.
 
 Report slides show each result twice: as bars (easy to read) and as the Err spectrum with ANC off and on (where the
@@ -67,7 +70,9 @@ AFTER_S = 20.0             # recording after the runner exits (ANC keeps running
 TIMEOUT_S = 100.0          # runner timeout: ANC runs about 70 s while the runner is attached
 MAX_S = 900.0
 PROG_AFTER_RUNNER = 8.2    # program start (codec setup) after the runner start, 2026-11-17 runs: 8.10-8.30 s
-ANC_AFTER_RUNNER = 28.3    # ANC start after the runner start (program start + about 20 s), same runs
+ANC_AFTER_RUNNER = 31.0    # ANC start after the runner start, only for the run message and as the fallback of
+                           # find_anc_start. It grows with the boot prints: 28.1-28.6 s on 2026-11-17, 30.2 s with
+                           # ANC_DIAG, 30.9-31.1 s with the 2026-11-18 builds (buttons, timed switch-off)
 F0_RANGE = (560.0, 640.0)  # fan f0 at 100% duty: 602 Hz in August, 595-603 Hz on 2026-11-17
 TONE_HW = 6.0              # tone level = power within +-TONE_HW Hz
 SEG = int(0.5 * FS)        # PSD segment and hop
@@ -255,6 +260,7 @@ def components(f, p, f0):
 BAND_RE = re.compile(r'Ref band (\d+)-(\d+) Hz')                # firmware banner
 TRIP_RE = re.compile(r'Diverged ([\d.]+) s after ANC started')   # first [ANC TRIP] line of the divergence guard
 OFF_RE = re.compile(r'Output switched off ([\d.]+) s after ANC started')   # [ANC OFF] line of ANC_AUTO_OFF_S
+WAIT_RE = re.compile(r'\[ANC #\d+\] wait\s+t=([-+]?[\d.]+) s')   # status line of the ANC_START_DELAY_S wait
 
 
 def parse_log(text):
@@ -264,6 +270,7 @@ def parse_log(text):
                 step0=next((l for l in lines if l.startswith('[Step 0]')), None),
                 ready=any('SYSTEM READY' in l for l in lines),
                 status=[l for l in lines if re.match(r'\[ANC #\d+\]', l)],
+                waits=[float(v) for v in WAIT_RE.findall(text)],
                 trip=[l for l in lines if '[ANC TRIP]' in l],
                 off=[l for l in lines if '[ANC OFF]' in l],
                 diag=sum(1 for l in lines if l.startswith('[DIAG] t=')),
@@ -283,6 +290,67 @@ def load_run(wav):
     return base, x.astype(np.float64), meta, log
 
 
+def print_freezes(x, a, b, win=0.05, hop=0.01, drop=3.0):
+    """Stretches in [a, b) s where a status print froze J17 L: the 50 ms rms (10 ms hop) is more than `drop` dB under
+    the median of the span, for 0.15-1.5 s (a print halts the core for about 0.4 s). Returns [(start, end)] in s."""
+    i0, i1 = max(int(a * FS), 0), min(int(b * FS), x.size)
+    n, h = int(win * FS), int(hop * FS)
+    if i1 - i0 < 4 * n:
+        return []
+    c = np.concatenate([[0.0], np.cumsum(x[i0:i1] ** 2)])
+    s = np.arange(0, i1 - i0 - n, h)
+    r = 10 * np.log10((c[s + n] - c[s]) / n + 1e-30)
+    low = np.concatenate([[0], (r < np.median(r) - drop).astype(int), [0]])
+    edges = np.flatnonzero(np.diff(low))
+    tc = (i0 + s + n / 2) / FS   # window centres
+    out = []
+    for k0, k1 in zip(edges[::2], edges[1::2]):   # windows k0 .. k1 - 1 are low
+        st, en = tc[k0] - hop / 2, tc[k1 - 1] + hop / 2
+        if out and st - out[-1][1] < 0.1:
+            out[-1] = (out[-1][0], en)
+        else:
+            out.append((st, en))
+    return [(st, en) for st, en in out if 0.15 <= en - st <= 1.5]
+
+
+def find_anc_start(x, log, t_r, t_x):
+    """ANC start in the recording (s) and how it was found.
+
+    During the ANC_START_DELAY_S wait the firmware prints a status line every 2 s of core time ("[ANC #n] wait
+    t=-3.0 s ..."). Each print halts the core for about 0.4 s and freezes J17 L, so the recording shows a train of
+    freezes, each starting 2 s after the previous one ended. The last line's t is the core time left until the ANC
+    start when the line was made, and the core runs in real time again after the print, so ANC starts |t| after the
+    last freeze of the train ends. In the 2026-11-17/18 runs f0 or 6 f0 drops within 0.1 s of that time; the fixed
+    runner + 28.3 s used before was 0.2 s late to 2.8 s early, as the boot prints changed with the build. Without the
+    train (fan off: Err too quiet for the freezes to show) it falls back to runner + ANC_AFTER_RUNNER."""
+    fallback = (t_r + ANC_AFTER_RUNNER, f'runner + {ANC_AFTER_RUNNER:.1f} s (ANC_AFTER_RUNNER, %s)')
+    waits = log['waits']
+    if len(waits) < 2:
+        return fallback[0], fallback[1] % 'no wait-phase status lines in the log'
+    left, gap = -waits[-1], waits[-1] - waits[-2]
+    fr = print_freezes(x, t_r, min(t_x, t_r + 90.0))
+    chain = []   # first train of freezes `gap` apart, end to next start: the wait-phase prints
+    for k in range(1, len(fr)):
+        if abs(fr[k][0] - fr[k - 1][1] - gap) < 0.2:
+            chain = (chain or [k - 1]) + [k]
+        elif len(chain) >= min(3, len(waits)):
+            break
+        else:
+            chain = []
+    if len(chain) < min(3, len(waits)):
+        return fallback[0], fallback[1] % f'no train of print freezes {gap:.0f} s apart'
+    note = ''
+    if len(chain) > len(waits):   # a print right after the start (an early trip) joined the train
+        chain = chain[:len(waits)]
+        note = '; the train was longer than the wait lines, cut after the last one'
+    s, e = fr[chain[-1]]
+    ta = e + left
+    if not 15.0 <= ta - t_r <= 60.0:
+        return fallback[0], fallback[1] % f'the print freezes give runner + {ta - t_r:.1f} s, implausible'
+    return ta, (f'{left:.1f} s after the last wait-phase print freeze ({s:.2f}-{e:.2f} s); '
+                f'{len(chain)} of {len(waits)} wait prints found{note}')
+
+
 def measure(wav, f0=None):
     """PSDs, f0, the attenuation per window and the time course of one run, for analyze and report.
 
@@ -290,7 +358,10 @@ def measure(wav, f0=None):
     base, x, meta, log = load_run(wav)
     dur = x.size / FS
     t_r, t_x = meta['runner_start_s'], meta['runner_exit_s']
-    ta = meta.get('anc_start_s', t_r + ANC_AFTER_RUNNER)
+    if 'anc_start_s' in meta:   # set by hand in the .json
+        ta, ta_how = meta['anc_start_s'], 'anc_start_s in the .json'
+    else:
+        ta, ta_how = find_anc_start(x, log, t_r, t_x)
     stops = []   # (time in the recording, marker label, window after it, text)
     if log['trip_s'] is not None:
         stops.append((ta + log['trip_s'], 'guard trip', 'after the trip (muted)',
@@ -332,16 +403,18 @@ def measure(wav, f0=None):
         tt.append(a + 1.0 - ta)
         rows.append([10 * np.log10(c_off[q] / max(c[q], 1e-30)) for q in COMPONENTS])
     rows = np.array(rows).reshape(-1, len(COMPONENTS))
-    return dict(base=base, meta=meta, log=log, dur=dur, t_r=t_r, t_x=t_x, ta=ta, t_trip=t_trip, stop_label=stop_label,
-                stop_text=stop_text, f=f, f0=f0, f0_text=f0_text, c_off=c_off, win=win, spec=spec, nseg=nseg, res=res, on_key=on_key,
-                tt=np.array(tt), rows={q: rows[:, i] for i, q in enumerate(COMPONENTS)})
+    return dict(base=base, meta=meta, log=log, dur=dur, t_r=t_r, t_x=t_x, ta=ta, ta_how=ta_how, t_trip=t_trip,
+                stop_label=stop_label, stop_text=stop_text, f=f, f0=f0, f0_text=f0_text, c_off=c_off, win=win,
+                spec=spec, nseg=nseg, res=res, on_key=on_key, tt=np.array(tt),
+                rows={q: rows[:, i] for i, q in enumerate(COMPONENTS)})
 
 
 def analyze(wav, f0=None):
     m = measure(wav, f0)
     base, meta, log, ta, t_r, c_off = m['base'], m['meta'], m['log'], m['ta'], m['t_r'], m['c_off']
-    L = [f'{Path(wav).name}: {m["dur"]:.1f} s; runner start {t_r:.2f} s, exit {m["t_x"]:.2f} s; ANC start taken as '
-         f'{ta:.2f} s (runner + {ta - t_r:.1f} s)', f'Notes: {meta.get("notes", "")}', m['f0_text'],
+    L = [f'{Path(wav).name}: {m["dur"]:.1f} s; runner start {t_r:.2f} s, exit {m["t_x"]:.2f} s',
+         f'ANC start {ta:.2f} s (runner + {ta - t_r:.2f} s): {m["ta_how"]}', f'Notes: {meta.get("notes", "")}',
+         m['f0_text'],
          f'ANC off: {ta - 10.5:.1f}-{ta - 0.5:.1f} s, {m["nseg"]["ANC off"]} segments of 0.5 s without frozen stretches',
          'Attenuation, off - on (dB, above 0 = quieter); tones = power within +-6 Hz:',
          '  window                          ' + ''.join(f'{c:>11s}' for c in COMPONENTS)]
@@ -476,6 +549,7 @@ def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
     for lab, m in zip(labels, runs):
         a, b = m['win'][m['on_key']]
         L += [f'{lab}: {m["base"].name}.wav', f'  {m["f0_text"]}',
+              f'  ANC start {m["ta"]:.2f} s: {m["ta_how"]}',
               f'  ANC off {m["ta"] - 10.5:.1f}-{m["ta"] - 0.5:.1f} s ({m["nseg"]["ANC off"]} segments of 0.5 s); '
               f'ANC on = {m["on_key"]} {a:.1f}-{b:.1f} s ({m["nseg"][m["on_key"]]} segments)']
         if m['t_trip'] is not None:
@@ -734,8 +808,10 @@ def diag(wav, clamp=0.9):
 # ---------------------------------------------------------------- synthetic test
 
 def synth(path):
-    """Fan-like noise with f0 and 6 f0 tones; f0 drops 22 dB with a 0.4 s time constant at the ANC start; two
-    0.45 s print freezes in the ANC-off window, which the analysis must leave out."""
+    """Fan-like noise with f0 and 6 f0 tones; f0 drops 22 dB with a 0.4 s time constant at the ANC start. As on the
+    board, the seven wait-phase status prints (t = -13 ... -1 s) freeze the output for 0.4 s each, each 2 s after the
+    previous one ended, the last one ending 1 s before the ANC start. The analysis must find the start from them
+    (it is 1.3 s off the ANC_AFTER_RUNNER fallback) and leave them out of ANC off."""
     from scipy.signal import butter, lfilter
     rng = np.random.default_rng(1)
     t_r, f0 = PRE_S, 602.37
@@ -744,22 +820,28 @@ def synth(path):
     t = np.arange(n) / FS
     b, a_ = butter(2, [80, 8000], 'bandpass', fs=FS)
     x = lfilter(b, a_, rng.standard_normal(n)) * 10 ** (-58 / 20)
-    t_anc = t_r + ANC_AFTER_RUNNER
+    t_anc = t_r + ANC_AFTER_RUNNER + 1.3
     g = np.where(t < t_anc, 1.0, 10 ** (-22 / 20) + (1 - 10 ** (-22 / 20)) * np.exp(-(t - t_anc) / 0.4))
     x += 10 ** (-60 / 20) * g * np.sin(2 * np.pi * f0 * t) + 10 ** (-57 / 20) * np.sin(2 * np.pi * 6 * f0 * t + 1)
-    for tf in (t_anc - 3.2, t_anc - 1.2):    # print freezes: the held output decays through the US205 AC coupling
-        i0, i1 = int(tf * FS), int((tf + 0.45) * FS)
+    waits = np.arange(-13.0, 0.0, 2.0)
+    end = t_anc - 1.0
+    for _ in waits:   # backwards from the last print; the held output decays through the US205 AC coupling
+        i0, i1 = int((end - 0.4) * FS), int(end * FS)
         x[i0:i1] = x[i0] * np.exp(-np.arange(i1 - i0) / (0.0015 * FS))
+        end -= 0.4 + 2.0
     p = Path(path)
     wavfile.write(str(p), FS, x.astype(np.float32))
     base = Path(str(p)[:-4])
     Path(str(base) + '.json').write_text(json.dumps(dict(fs=FS, runner_start_s=t_r, runner_exit_s=t_x, runner_rc=0,
                                                          notes='synthetic: f0 -22 dB, 6 f0 unchanged')),
                                          encoding='utf-8')
+    status = ''.join(f'[ANC #{int(FS * (15 + w)) + 24}] wait t={w:+.1f} s  ref=-44.6 err=-66.0 dB  Px\'=1.00e-08  '
+                     f'y_pk=0.000 clip=0/96000  W2=0.000e+00\n' for w in waits)
     Path(str(base) + '.log').write_text('[Step 0] SPORT4/DMA10-11 idle at boot\n>>> SYSTEM READY\n'
-                                        '>>> Ref band 400-1500 Hz, mu 0.01, eps 1e-11, clamp 0.9\n', encoding='utf-8')
-    print('wrote', p, '(expect f0 about +21 dB, limited by the noise within +-6 Hz; 6 f0 and the bands 0 dB; '
-          'total about +1 dB)')
+                                        '>>> Ref band 400-1500 Hz, mu 0.01, eps 1e-11, clamp 0.9\n' + status,
+                                        encoding='utf-8')
+    print('wrote', p, f'(expect the ANC start at {t_anc:.2f} s from the print freezes, f0 about +21 dB, limited by '
+          'the noise within +-6 Hz; 6 f0 and the bands 0 dB; total about +1 dB)')
 
 
 def main():
