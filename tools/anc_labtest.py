@@ -28,7 +28,10 @@ Analysis: ANC off is the 10 s before the ANC start (runner start + ANC_AFTER_RUN
 status print froze J17 L (a JTAG printf halts the core and the SPORT DMA repeats its last buffers). Attenuation is
 off - on in dB (above 0 = quieter) for the fan tones f0, 2 f0, 5 f0, 6 f0 (power within +-6 Hz), 400-560 Hz,
 7-12 kHz and the total 60 Hz-20 kHz. When the divergence guard tripped ("[ANC TRIP] Diverged ... s after ANC started"
-in the log), ANC on ends 0.5 s before the trip, since the guard muted the speaker there.
+in the log), ANC on ends 0.5 s before the trip, since the guard muted the speaker there. A timed switch-off
+(ANC_AUTO_OFF_S, "[ANC OFF] Output switched off ... s after ANC started") ends it the same way. With ANC_AUTO_OFF_S,
+give run a --timeout that covers the ANC start (about 28 s after the runner start), ANC_AUTO_OFF_S and the
+diagnostics dump that follows.
 
 Report slides show each result twice: as bars (easy to read) and as the Err spectrum with ANC off and on (where the
 change is, including what got louder). "report" writes both, plus the attenuation over time, for up to 3 runs side
@@ -251,19 +254,22 @@ def components(f, p, f0):
 
 BAND_RE = re.compile(r'Ref band (\d+)-(\d+) Hz')                # firmware banner
 TRIP_RE = re.compile(r'Diverged ([\d.]+) s after ANC started')   # first [ANC TRIP] line of the divergence guard
+OFF_RE = re.compile(r'Output switched off ([\d.]+) s after ANC started')   # [ANC OFF] line of ANC_AUTO_OFF_S
 
 
 def parse_log(text):
     lines = text.splitlines()
-    band, trip = BAND_RE.search(text), TRIP_RE.search(text)
+    band, trip, off = BAND_RE.search(text), TRIP_RE.search(text), OFF_RE.search(text)
     return dict(banner=[l for l in lines if l.startswith('>>>')],
                 step0=next((l for l in lines if l.startswith('[Step 0]')), None),
                 ready=any('SYSTEM READY' in l for l in lines),
                 status=[l for l in lines if re.match(r'\[ANC #\d+\]', l)],
                 trip=[l for l in lines if '[ANC TRIP]' in l],
+                off=[l for l in lines if '[ANC OFF]' in l],
                 diag=sum(1 for l in lines if l.startswith('[DIAG] t=')),
                 band=(int(band[1]), int(band[2])) if band else None,
-                trip_s=float(trip[1]) if trip else None)
+                trip_s=float(trip[1]) if trip else None,
+                off_s=float(off[1]) if off else None)
 
 
 def load_run(wav):
@@ -280,12 +286,19 @@ def load_run(wav):
 def measure(wav, f0=None):
     """PSDs, f0, the attenuation per window and the time course of one run, for analyze and report.
 
-    ANC on ends 0.5 s before a divergence trip: the guard muted the speaker there."""
+    ANC on ends 0.5 s before a divergence trip (the guard muted the speaker there) or a timed switch-off."""
     base, x, meta, log = load_run(wav)
     dur = x.size / FS
     t_r, t_x = meta['runner_start_s'], meta['runner_exit_s']
     ta = meta.get('anc_start_s', t_r + ANC_AFTER_RUNNER)
-    t_trip = ta + log['trip_s'] if log['trip_s'] is not None else None
+    stops = []   # (time in the recording, marker label, window after it, text)
+    if log['trip_s'] is not None:
+        stops.append((ta + log['trip_s'], 'guard trip', 'after the trip (muted)',
+                      f'The guard tripped {log["trip_s"]:.1f} s after the ANC start'))
+    if log['off_s'] is not None:
+        stops.append((ta + log['off_s'], 'switch-off', 'after the switch-off',
+                      f'The output was switched off {log["off_s"]:.1f} s after the ANC start'))
+    t_trip, stop_label, after_key, stop_text = min(stops) if stops else (None, None, None, None)
     f, p_off, n_off = mean_psd(x, ta - 10.5, ta - 0.5)
     if f0 is None:
         f0, prom = find_f0(f, p_off, *F0_RANGE)
@@ -298,11 +311,11 @@ def measure(wav, f0=None):
     if t_trip is None:
         win['after the runner exit'] = (t_x + 2.0, dur - 1.0)
     else:
-        win['after the trip (muted)'] = (t_trip + 1.0, dur - 1.0)   # status prints are back: skip frozen stretches
+        win[after_key] = (t_trip + 1.0, dur - 1.0)   # status prints are back: skip frozen stretches
     win = {k: v for k, v in win.items() if v[1] - v[0] >= 3.0}
     spec, nseg, res = {'ANC off': p_off}, {'ANC off': n_off}, {}
     for k, (a, b) in win.items():
-        _, p, n = mean_psd(x, a, b, skip_frozen=k.startswith('after the trip'))
+        _, p, n = mean_psd(x, a, b, skip_frozen=(k == after_key))
         spec[k], nseg[k] = p, n
         c = components(f, p, f0)
         res[k] = {q: 10 * np.log10(c_off[q] / max(c[q], 1e-30)) for q in COMPONENTS}
@@ -319,8 +332,8 @@ def measure(wav, f0=None):
         tt.append(a + 1.0 - ta)
         rows.append([10 * np.log10(c_off[q] / max(c[q], 1e-30)) for q in COMPONENTS])
     rows = np.array(rows).reshape(-1, len(COMPONENTS))
-    return dict(base=base, meta=meta, log=log, dur=dur, t_r=t_r, t_x=t_x, ta=ta, t_trip=t_trip, f=f, f0=f0,
-                f0_text=f0_text, c_off=c_off, win=win, spec=spec, nseg=nseg, res=res, on_key=on_key,
+    return dict(base=base, meta=meta, log=log, dur=dur, t_r=t_r, t_x=t_x, ta=ta, t_trip=t_trip, stop_label=stop_label,
+                stop_text=stop_text, f=f, f0=f0, f0_text=f0_text, c_off=c_off, win=win, spec=spec, nseg=nseg, res=res, on_key=on_key,
                 tt=np.array(tt), rows={q: rows[:, i] for i, q in enumerate(COMPONENTS)})
 
 
@@ -335,17 +348,19 @@ def analyze(wav, f0=None):
     for k, (a, b) in m['win'].items():
         L.append(f'  {k:22s} {a:6.1f}-{b:6.1f}' + ''.join(f'{m["res"][k][q]:+11.1f}' for q in COMPONENTS))
     if m['t_trip'] is not None:
-        L.append(f'  The guard tripped {log["trip_s"]:.1f} s after the ANC start ({m["t_trip"]:.1f} s): ANC on ends '
-                 '0.5 s before it.')
+        L.append(f'  {m["stop_text"]} ({m["t_trip"]:.1f} s): ANC on ends 0.5 s before it.')
     L.append('  ANC off levels (dBFS on the US205; tones as amplitude): '
              + ', '.join(f'{q} {10 * np.log10((2 if "f0" in q else 1) * c_off[q] + 1e-30):.1f}' for q in COMPONENTS))
     L.append('Log:')
     L += ['  ' + l for l in log['banner'][:7]]
+    L += ['  ' + l for l in log['banner'][7:] if 'idle level' in l]   # pushbutton idle levels (ANC_BUTTONS)
     if log['step0']:
         L.append('  ' + log['step0'])
     L.append(f"  SYSTEM READY: {'yes' if log['ready'] else 'NO'}; runner rc {meta.get('runner_rc')}")
     L += ['  ' + l for l in log['status'][-2:]]
     L.append('  ' + ('; '.join(log['trip']) if log['trip'] else 'no [ANC TRIP] line while the runner was attached'))
+    if log['off']:
+        L.append('  ' + '; '.join(log['off']))
     if log['diag']:
         L.append(f'  {log["diag"]} [DIAG] lines: run "anc_labtest.py diag" on this wav')
     txt = '\n'.join(L)
@@ -376,7 +391,8 @@ def plot(base, m):
     if m['t_trip'] is not None:
         t = m['t_trip'] - m['ta']
         ax.axvline(t, color=C_TRIP, lw=0.9, ls='--')
-        ax.text(t, 0.90, ' guard trip', transform=ax.get_xaxis_transform(), va='top', fontsize=10, color='#444444')
+        ax.text(t, 0.90, ' ' + m['stop_label'], transform=ax.get_xaxis_transform(), va='top', fontsize=10,
+                color='#444444')
     ax.axhline(0, color='#888888', lw=0.8)
     ax.set_xlabel('time from the ANC start (s), 2 s windows')
     ax.set_ylabel('Err attenuation, off - on (dB)')
@@ -463,7 +479,7 @@ def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
               f'  ANC off {m["ta"] - 10.5:.1f}-{m["ta"] - 0.5:.1f} s ({m["nseg"]["ANC off"]} segments of 0.5 s); '
               f'ANC on = {m["on_key"]} {a:.1f}-{b:.1f} s ({m["nseg"][m["on_key"]]} segments)']
         if m['t_trip'] is not None:
-            L.append(f'  The guard tripped {m["log"]["trip_s"]:.1f} s after the ANC start; ANC on ends 0.5 s before it.')
+            L.append(f'  {m["stop_text"]}; ANC on ends 0.5 s before it.')
     w = max(len(l) for l in labels)
     L += ['Attenuation, off - on (dB, above 0 = quieter); tones = power within +-6 Hz:',
           '  ' + ' ' * w + ''.join(f'{q:>11s}' for q in COMPONENTS)]
@@ -480,7 +496,7 @@ def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
     with plt.rc_context(SLIDE_RC):
         report_bars(plt, runs, labels, names, out / f'{name}_bars.png',
                     title or ('Steady state from 10 s after the ANC start (above 0 = quieter)' if steady
-                              else 'ANC on, before the guard trip where there is one (above 0 = quieter)'))
+                              else 'ANC on, before the trip or switch-off where there is one (above 0 = quieter)'))
         report_spectrum(plt, runs, labels, out / f'{name}_spectrum.png')
         report_time(plt, runs, labels, names, out / f'{name}_time.png')
     print('Figures in', out)
@@ -583,7 +599,8 @@ def report_time(plt, runs, labels, names, path):
         if m['t_trip'] is not None:
             t = m['t_trip'] - m['ta']
             ax.axvline(t, color=C_TRIP, lw=0.9, ls='--')
-            ax.text(t, 0.97, ' guard trip', transform=ax.get_xaxis_transform(), va='top', fontsize=13, color='#444444')
+            ax.text(t, 0.97, ' ' + m['stop_label'], transform=ax.get_xaxis_transform(), va='top', fontsize=13,
+                    color='#444444')
         ax.axhline(0, color='#888888', lw=0.8)
         panel_title(ax, lab, n)
         ax.set_xlabel('time from the ANC start (s)')
@@ -622,10 +639,28 @@ def diag(wav, clamp=0.9):
             t, ypk, clip, x, fy, u, y, e, w2 = H[i]
             L.append(f'  {t:6.2f}  {ypk:6.3f}  {clip:4.2f}  {x:6.1f} {fy:6.1f} {u:6.1f} {y:6.1f} {e:6.1f}   {w2:.3e}')
     sp = Path(str(base) + ' snapshot.txt')
-    S = np.loadtxt(sp, comments='#') if sp.exists() else None
+    S, expected = None, None
+    if sp.exists():
+        # The runner may end while the board is still writing (JTAG file I/O is slow): drop an unfinished last line
+        text = sp.read_text(encoding='utf-8', errors='replace')
+        lines = text.splitlines() if text.endswith('\n') else text.splitlines()[:-1]
+        head = re.search(r'the last (\d+) ANC core samples', text)
+        expected = int(head[1]) if head else None
+        rows = []
+        for l in lines:
+            parts = l.split()
+            if l.startswith('#') or len(parts) != 5:
+                continue
+            try:
+                rows.append([float(v) for v in parts])
+            except ValueError:
+                continue
+        S = np.array(rows) if rows else None
     if S is not None:
         n = len(S)
-        L.append(f'Snapshot: {n} samples ({1e3 * n / FS:.1f} ms) up to the trip')
+        L.append(f'Snapshot: {n} samples ({1e3 * n / FS:.1f} ms) up to the trip or switch-off'
+                 + (f'; PARTIAL, the board was writing {expected} when the runner ended' if expected and n < expected
+                    else ''))
         for k, nm in enumerate(DIAG_NAMES):
             v = S[:, k]
             L.append(f'  {nm:20s} rms {db(np.sqrt(np.mean(v ** 2))):6.1f} dB  peak {np.max(np.abs(v)):.4f}')
@@ -676,7 +711,8 @@ def diag(wav, clamp=0.9):
             a5.semilogx(f[m], db(spec[k][m]), color=DIAG_COLS[k], lw=1.0, label=DIAG_NAMES[k])
         top = max(db(np.max(s[m])) for s in spec)
         a5.set_ylim(top - 130, top + 5)
-        a5.set_title(f'snapshot spectra, last {1e3 * n / FS:.0f} ms before the trip (amplitude, dB re FS)', loc='left')
+        a5.set_title(f'snapshot spectra, last {1e3 * n / FS:.0f} ms before the trip or switch-off (amplitude, dB re FS)',
+                     loc='left')
         a5.set_xlabel('Hz')
         a5.legend(frameon=False, ncol=5, fontsize=8, loc='lower left')
         a5.grid(True, which='both', lw=0.4, color=GRID)
@@ -685,8 +721,8 @@ def diag(wav, clamp=0.9):
         tt = (np.arange(k0, n) - n) / FS * 1e3
         a6.plot(tt, S[k0:, 3], color=DIAG_COLS[3], lw=0.9, label='y before the clamp')
         a6.plot(tt, np.clip(S[k0:, 3], -clamp, clamp), color=INK, lw=0.7, label='y sent (clamped)')
-        a6.set_title('y in the last 20 ms before the trip', loc='left')
-        a6.set_xlabel('ms before the trip')
+        a6.set_title('y in the last 20 ms before the trip or switch-off', loc='left')
+        a6.set_xlabel('ms before the trip or switch-off')
         a6.legend(frameon=False, fontsize=8, loc='lower left')
         a6.grid(True, lw=0.5, color=GRID)
     fig.tight_layout()
