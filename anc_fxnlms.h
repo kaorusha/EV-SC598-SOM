@@ -79,6 +79,25 @@
 #define ANC_TRIP_FADE_MS        5u
 #define ANC_TRIP_QUIET_MS       10u      // 升頻濾波器拖尾約 1 ms、DMA 緩衝 4 個取樣，這個值留足餘裕
 
+// 防飽和 (rescaling，Qiu & Hansen 2001)。2026-11-19 加。
+// 做法: W 正在更新時，限幅前 |y| 一超過 ANC_SAFE_OUTPUT_LIMIT，就把整個 W 乘上 限幅 / |y|，讓這個 y 剛好等於限幅。
+// 不加時的問題: 需求超過限幅的音 (100% duty 的 3.6 kHz，隨出風口前方的環境變，有時要 1.0 以上) 被截成方波。
+//   W 為了多擠出一點基頻越積越大 (windup)，限幅前 y 到 2-4，截斷比例超過 ANC_TRIP_CLIP_FRACTION 就觸發保護，
+//   誤差麥上卻看不到發散。2026-11-17 的 400-5000 和 2026-11-19 的 400-4000 按鍵測試都是這樣。
+// 加了之後: 輸出保持正弦、不削波，那個音只消到限幅做得到的程度。
+// y_pk (狀態列、[DIAG]) 仍是縮小前的需求: 超過限幅就表示正在縮。
+#define ANC_RESCALE             1
+
+// 發散保護之二。2026-11-19 加，因為防飽和讓上面的截斷比例幾乎不會超過門檻。
+// 問題: W 往錯的方向長時 (例如 Ŝ 相位錯)，防飽和把輸出擋在限幅，喇叭一直送一個不削波的音，截斷比例看不出來。
+// 改看誤差麥經參考帶通後的均方:
+//   - 基準: 喇叭沒出聲時 (開機等待、輸出關上、判定後) 以 ANC_TRIP_ERR_REF_TAU_S 平均。
+//   - ANC 全開時以 ANC_TRIP_ERR_TAU_S 平均，比基準大 ANC_TRIP_ERR_DB 就判定: ANC 在加噪音，不是在消。
+// 參考值: 正常時帶通內的音被消掉，比基準小 5-15 dB。2026-11-17 的 447 Hz 發散若被擋在限幅，估計比基準大約 3.4 dB。
+#define ANC_TRIP_ERR_DB         2.0f
+#define ANC_TRIP_ERR_TAU_S      1.0f
+#define ANC_TRIP_ERR_REF_TAU_S  2.0f
+
 // 喇叭輸出開關 (ANC_Set_Output；按鍵與 ANC_AUTO_OFF_S 都經過它):
 //   - 關: y 在 ANC_SWITCH_FADE_MS 內線性淡出到 0，之後不再算 W 的卷積
 //   - 開: 用停住的 W 淡入，已收斂的音調馬上消掉，不必重新收斂
@@ -104,7 +123,8 @@ typedef enum
 {
     ANC_TRIP_NONE = 0,
     ANC_TRIP_CLIP,      // 持續截斷
-    ANC_TRIP_NAN        // y 變成 NaN (W 已經壞了)
+    ANC_TRIP_NAN,       // y 變成 NaN (W 已經壞了)
+    ANC_TRIP_ERR        // 參考帶通內的誤差麥比喇叭沒出聲時大 ANC_TRIP_ERR_DB
 } ANC_Trip_Reason;
 
 // 判定發散當時的數值 (ANC_Get_Trip)
@@ -115,6 +135,7 @@ typedef struct
     float clip_frac;    // 平滑後的截斷比例
     float y_peak;       // 限幅前 |y| 的峰值 (以 ANC_TRIP_TAU_S 衰減)
     float freq_hz;      // 限幅前 y 的過零率換算的頻率 (發散時 y 幾乎是單音)
+    float err_db;       // 參考帶通內的誤差麥比喇叭沒出聲時大幾 dB (ANC_TRIP_ERR 的判定量；-99 = 還沒有基準)
 } ANC_Trip;
 
 // TDM4 雙端子獨立輸出 (Slot 0,1 -> J18 喇叭端子; Slot 2,3 -> J4/J17 電腦/NI-9234 監聽端子, J4 = J17 經耳機放大):

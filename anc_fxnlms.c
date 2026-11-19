@@ -1,3 +1,4 @@
+#include <math.h>
 #include "anc_fxnlms.h"
 #include "anc_ref_band.h"
 
@@ -79,6 +80,17 @@ static volatile uint32_t quiet_samples = 0u;   // 淡出完後的取樣數 (數�
 static volatile ANC_Trip_Reason trip_reason = ANC_TRIP_NONE;
 static volatile float trip_seconds = 0.0f, trip_clip = 0.0f, trip_peak = 0.0f, trip_hz = 0.0f;
 
+// 發散保護之二 (anc_fxnlms.h 的 ANC_TRIP_ERR_*): 誤差麥經參考帶通後的均方
+#define ANC_ERR_ALPHA     (1.0f / (ANC_TRIP_ERR_TAU_S * (float)ANC_CORE_FS))
+#define ANC_ERR_REF_ALPHA (1.0f / (ANC_TRIP_ERR_REF_TAU_S * (float)ANC_CORE_FS))
+static ANC_Ref_Band_State err_band;
+static float err_ref     = 0.0f;    // 基準: 喇叭沒出聲時的平均 ...
+static float err_ref_wt  = 0.0f;    // ... 和同樣平均的 1 (err_ref / err_ref_wt 補正從 0 起算的偏低)
+static float err_on      = 0.0f;    // ANC 全開時的平均，每次 (重新) 開始從基準起算
+static bool  err_on_init = false;
+static float err_lim     = 1.0f;    // 10^(ANC_TRIP_ERR_DB / 10)，ANC_Init 算
+static volatile float trip_err = 0.0f;   // 判定當時 err_on / 基準
+
 // 喇叭輸出開關 (anc_fxnlms.h 的 ANC_SWITCH_FADE_MS / ANC_AUTO_OFF_S): out_req 由 ANC_Set_Output 或定時關閉寫入，
 // 其餘只在中斷裡改
 #define ANC_SWITCH_STEP (1000.0f / ((float)ANC_SWITCH_FADE_MS * (float)ANC_CORE_FS))   // 每個核心取樣的增益變化
@@ -144,6 +156,7 @@ static void anc_trip(ANC_Trip_Reason reason)
     trip_clip    = clip_avg;
     trip_peak    = y_hold;
     trip_hz      = (zc_wt > 0.0f) ? (zc_avg / zc_wt) * (float)ANC_CORE_FS * 0.5f : 0.0f;
+    trip_err     = (err_on_init && (err_ref > 0.0f)) ? err_on * err_ref_wt / err_ref : 0.0f;
     trip_reason  = reason;
 }
 
@@ -172,6 +185,7 @@ static void anc_restart(void)
     off_quiet     = 0u;
     off_seconds   = 0.0f;
     auto_off_done = false;
+    err_on_init   = false;  // 誤差麥的平均從基準重新起算 (基準本身保留: 它只在喇叭沒出聲時更新)
 #if ANC_DIAG
     diag_snap_idx = 0u;
     diag_snap_n   = 0u;
@@ -222,6 +236,13 @@ void ANC_Init(void)
     anc_rate_reset(&dec_ref);
     anc_rate_reset(&int_y);
     anc_ref_band_reset(&ref_band);
+    anc_ref_band_reset(&err_band);
+    err_ref      = 0.0f;
+    err_ref_wt   = 0.0f;
+    err_on       = 0.0f;
+    err_on_init  = false;
+    err_lim      = powf(10.0f, 0.1f * ANC_TRIP_ERR_DB);
+    trip_err     = 0.0f;
     wait_samples = ANC_START_DELAY_S * ANC_CORE_FS;
     run_samples  = 0u;
     st_samples   = 0u;
@@ -356,6 +377,13 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         // 2b. 迴路內參考帶通 (anc_ref_band.h): 只讓要消的音調進 W 與 Ŝ，誤差麥不濾波
         u_hat_n = anc_ref_band_filter(&ref_band, u_hat_n);
 #endif
+        // 2c. 誤差麥經同一個參考帶通，只給發散保護之二 (4b、4d) 用，不進 W 的更新
+#if (ANC_REF_BAND != ANC_REF_BAND_NONE)
+        float e_band = anc_ref_band_filter(&err_band, d_n);
+#else
+        float e_band = d_n;
+#endif
+        float e2_band = e_band * e_band;
 
         // 3. 雙鏡像更新參考訊號歷史緩衝區
         x_history[anc_buf_idx] = u_hat_n;
@@ -402,7 +430,23 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
 #endif
         float y_abs = (y_n < 0.0f) ? -y_n : y_n;
         if (y_abs > y_peak) y_peak = y_abs;
-        bool clipped = (y_abs > ANC_SAFE_OUTPUT_LIMIT);
+        bool rescaled = false;
+#if ANC_RESCALE
+        // 4a. 防飽和 (anc_fxnlms.h 的 ANC_RESCALE): W 正在更新時 |y| 超過限幅，把 W 乘上 限幅 / |y|，這個 y 剛好等於
+        //     限幅，W 不再越積越大。連同還沒套用的累積漏洩一起立刻套用 (2048 次乘法)。y 停在限幅後，大約每個
+        //     主音週期才再縮一次
+        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE) && on_req && (sw_gain >= 1.0f)
+            && (y_abs > ANC_SAFE_OUTPUT_LIMIT))
+        {
+            float g = ANC_SAFE_OUTPUT_LIMIT / y_abs;
+            lms_leak_2048(w_coeffs, leak_acc * g);
+            leak_acc   = 1.0f;
+            leak_count = 0;
+            y_n *= g;
+            rescaled = true;
+        }
+#endif
+        bool clipped = !rescaled && (y_abs > ANC_SAFE_OUTPUT_LIMIT);
         if (clipped)
         {
             y_n = (y_n > 0.0f) ? ANC_SAFE_OUTPUT_LIMIT : -ANC_SAFE_OUTPUT_LIMIT;
@@ -412,7 +456,7 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE) && on_req)   // 每 ANC_DIAG_TICK_MS 一筆的統計
         {
             dg_n++;
-            if (clipped) dg_clip++;
+            if (clipped || rescaled) dg_clip++;   // 到限幅的取樣: 截斷或防飽和縮放
             if (y_abs > dg_ypk) dg_ypk = y_abs;
             dg_x  += x_n * x_n;
             dg_fy += f_leak * f_leak;
@@ -433,7 +477,21 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             zc_wt    += ANC_TRIP_ALPHA * (1.0f - zc_wt);
             y_hold    = (y_abs > y_hold) ? y_abs : y_hold * (1.0f - ANC_TRIP_ALPHA);
             y_neg     = neg;
-            if (clip_avg > ANC_TRIP_CLIP_FRACTION) anc_trip(ANC_TRIP_CLIP);
+            // 發散保護之二: 帶通內誤差麥的平均，(重新) 開始時從基準起算；比基準大 ANC_TRIP_ERR_DB 就判定
+            if (!err_on_init)
+            {
+                err_on      = (err_ref_wt > 0.0f) ? err_ref / err_ref_wt : e2_band;
+                err_on_init = true;
+            }
+            err_on += ANC_ERR_ALPHA * (e2_band - err_on);
+            if (clip_avg > ANC_TRIP_CLIP_FRACTION)
+            {
+                anc_trip(ANC_TRIP_CLIP);
+            }
+            else if ((err_ref_wt > 0.5f) && (err_on * err_ref_wt > err_lim * err_ref))
+            {
+                anc_trip(ANC_TRIP_ERR);
+            }
         }
         if (trip_reason != ANC_TRIP_NONE)
         {
@@ -461,6 +519,14 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         else if (off_quiet < ANC_TRIP_QUIET_SAMPLES)
         {
             off_quiet++;   // 升頻濾波器的拖尾和 DMA 緩衝都歸零後，main loop 才印
+        }
+
+        // 4d. 發散保護之二的基準: 喇叭沒出聲時 (開機等待、判定後淡出完、輸出關上淡出完) 帶通內誤差麥的均方
+        if ((wait_samples != 0u) || ((trip_reason != ANC_TRIP_NONE) && (quiet_samples >= ANC_TRIP_QUIET_SAMPLES))
+            || (!on_req && (off_quiet >= ANC_TRIP_QUIET_SAMPLES)))
+        {
+            err_ref    += ANC_ERR_REF_ALPHA * (e2_band - err_ref);
+            err_ref_wt += ANC_ERR_REF_ALPHA * (1.0f - err_ref_wt);
         }
 
         // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅、乘過保護與開關增益後實際送出的 y_n)
@@ -591,6 +657,7 @@ bool ANC_Get_Trip(ANC_Trip *t)
     t->clip_frac = trip_clip;
     t->y_peak    = trip_peak;
     t->freq_hz   = trip_hz;
+    t->err_db    = (trip_err > 0.0f) ? 10.0f * log10f(trip_err) : -99.0f;
     return true;
 }
 

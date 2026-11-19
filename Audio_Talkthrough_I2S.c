@@ -1647,8 +1647,13 @@ int main(int argc, char *argv[])
 		printf(">>> MODE: ANC (FxNLMS, 48 kHz core, codec 192 kHz)\n");
 		printf(">>> Ref band %s, mu %g, eps %g, clamp %g; ANC starts %u s after boot\n",
 			   ANC_REF_BAND_NAME, ANC_MU, ANC_EPSILON, ANC_SAFE_OUTPUT_LIMIT, ANC_START_DELAY_S);
-		printf(">>> Divergence guard: speaker muted if over %.0f%% of samples clip (%.2f s average)\n",
-			   100.0f * ANC_TRIP_CLIP_FRACTION, ANC_TRIP_TAU_S);
+#if ANC_RESCALE
+		printf(">>> Output limit %g kept by scaling W down (anti-windup: no clipping, W does not grow past it)\n",
+			   ANC_SAFE_OUTPUT_LIMIT);
+#endif
+		printf(">>> Divergence guard: speaker muted if over %.0f%% of samples clip (%.2f s average) or the Err in the"
+			   " ref band gets %.1f dB louder than with the speaker off (%.1f s average)\n",
+			   100.0f * ANC_TRIP_CLIP_FRACTION, ANC_TRIP_TAU_S, ANC_TRIP_ERR_DB, ANC_TRIP_ERR_TAU_S);
 #if (ANC_PRINTS_AFTER_START == 0)
 		printf(">>> No status prints while ANC runs (JTAG printf would freeze the output), back after a trip\n");
 #endif
@@ -1818,6 +1823,12 @@ int main(int argc, char *argv[])
 					if (trip.reason == ANC_TRIP_NAN)
 					{
 						printf("\n[ANC TRIP] W turned NaN %.1f s after ANC started.\n", trip.seconds);
+					}
+					else if (trip.reason == ANC_TRIP_ERR)
+					{
+						printf("\n[ANC TRIP] Diverged %.1f s after ANC started: Err in the ref band %.1f dB louder than with"
+							   " the speaker off (%.1f s average), y before the limit up to %.2f, about %.0f Hz.\n",
+							   trip.seconds, trip.err_db, ANC_TRIP_ERR_TAU_S, trip.y_peak, trip.freq_hz);
 					}
 					else
 					{

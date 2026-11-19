@@ -30,6 +30,7 @@ FLAGS = ['-proc', 'ADSP-SC598', '-si-revision', 'any', '-O', '-DCORE1', '-DNDEBU
 VARIANTS = {
     'as-is': {},
     'anc-diag-off': {'ANC_DIAG': '0'},
+    'rescale-off': {'ANC_RESCALE': '0'},
     'band-none': {'ANC_REF_BAND': 'ANC_REF_BAND_NONE'},
     'band-400-1500': {'ANC_REF_BAND': 'ANC_REF_BAND_400_1500'},
     'band-400-5000': {'ANC_REF_BAND': 'ANC_REF_BAND_400_5000'},
