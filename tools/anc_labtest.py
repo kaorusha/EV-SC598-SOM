@@ -894,6 +894,39 @@ def octave_avg(f, p, frac=SMOOTH_OCT, lo=60.0, hi=20000.0):
     return fc, (c[ih] - c[il]) / (ih - il)
 
 
+FLOOR_BANDS = ((250, 400), (400, 560), (560, 1000), (1000, 1500), (1500, 5000), (5000, 20000))
+
+
+def floor_changes(m):
+    """Numbers for the spectrum slide, off - on in dB (above 0 = quieter):
+    - the Err floor between the fan tones per FLOOR_BANDS band (bins within TONE_HW of any k f0 left out);
+    - the 12 f0 and 18 f0 tones (power within TONE_HW);
+    - the largest rise of the 1/24-octave off - on curve of the spectrum figure, and where it is.
+    Returns ({(lo, hi): dB}, {k: dB}, (dB, Hz))."""
+    f, p_off, p_on, f0 = m['f'], m['spec']['ANC off'], m['spec'][m['on_key']], m['f0']
+    far = np.abs(f - np.round(f / f0) * f0) > TONE_HW
+
+    def ratio(sel):
+        return float(10 * np.log10(p_off[sel].sum() / max(p_on[sel].sum(), 1e-30)))
+    bands = {(lo, hi): ratio((f >= lo) & (f < hi) & far) for lo, hi in FLOOR_BANDS}
+    tones = {k: ratio(np.abs(f - k * f0) <= TONE_HW) for k in (12, 18)}
+    fc, a_off = octave_avg(f, p_off)
+    _, a_on = octave_avg(f, p_on)
+    d = 10 * np.log10(a_off / np.maximum(a_on, 1e-30))
+    i = int(np.argmin(d))
+    return bands, tones, (float(d[i]), float(fc[i]))
+
+
+def floor_lines(lab, m):
+    """report text: floor_changes of one run."""
+    bands, tones, (dmin, fmin) = floor_changes(m)
+    span = lambda lo, hi: f'{lo / 1000:g}-{hi / 1000:g} kHz' if lo >= 1500 else f'{lo}-{hi} Hz'   # noqa: E731
+    return [f'  {lab}: floor between the tones ' + ', '.join(f'{span(lo, hi)} {v:+.1f}' for (lo, hi), v in
+                                                              bands.items()),
+            f'    12 f0 {tones[12]:+.1f}, 18 f0 {tones[18]:+.1f} dB; largest rise on the 1/{SMOOTH_OCT}-octave curve '
+            f'{dmin:+.1f} dB at {fmin:.0f} Hz']
+
+
 def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
     """Slide figures for 1-3 runs: <name>_bars.png (attenuation per component), <name>_spectrum.png (Err spectrum,
     ANC off and on, with off - on per 1/24 octave), <name>_time.png (attenuation over time) and <name>.txt."""
@@ -929,6 +962,9 @@ def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
           '  ' + ' ' * w + ''.join(f'{q:>11s}' for q in COMPONENTS)]
     L += [f'  {lab:{w}s}' + ''.join(f'{m["res"][m["on_key"]][q]:+11.1f}' for q in COMPONENTS)
           for lab, m in zip(labels, runs)]
+    L.append(f'Err floor between the fan tones (bins within +-{TONE_HW:.0f} Hz of every k f0 left out), off - on (dB):')
+    for lab, m in zip(labels, runs):
+        L += floor_lines(lab, m)
     L.append(f'Spectrum figure: 0.5 s Hann segments (2 Hz); off - on over 1/{SMOOTH_OCT}-octave bands. '
              'Figures: ' + ', '.join(f'{name}_{k}.png' for k in ('bars', 'spectrum', 'time')))
     txt = '\n'.join(L)
