@@ -79,6 +79,16 @@ static volatile uint32_t quiet_samples = 0u;   // 淡出完後的取樣數 (數�
 static volatile ANC_Trip_Reason trip_reason = ANC_TRIP_NONE;
 static volatile float trip_seconds = 0.0f, trip_clip = 0.0f, trip_peak = 0.0f, trip_hz = 0.0f;
 
+// 喇叭輸出開關 (anc_fxnlms.h 的 ANC_SWITCH_FADE_MS / ANC_AUTO_OFF_S): out_req 由 ANC_Set_Output 或定時關閉寫入，
+// 其餘只在中斷裡改
+#define ANC_SWITCH_STEP (1000.0f / ((float)ANC_SWITCH_FADE_MS * (float)ANC_CORE_FS))   // 每個核心取樣的增益變化
+static volatile bool  out_req  = true;          // 要求的狀態: true = 開
+static bool           out_prev = true;          // 中斷上一個取樣看到的 out_req (偵測切換)
+static volatile float sw_gain  = 1.0f;          // 開關的淡入淡出增益 0..1
+static volatile uint32_t off_quiet = 0u;        // 完全關上後的取樣數 (數到 ANC_TRIP_QUIET_SAMPLES 為止)，切換時歸零
+static volatile float off_seconds  = 0.0f;      // 最近一次關閉時，ANC 啟動後的秒數
+static volatile bool  auto_off_done = false;    // ANC_AUTO_OFF_S 已經關過
+
 #if ANC_DIAG
 // 診斷紀錄 (anc_fxnlms.h 的 ANC_DIAG): ANC 運轉中在中斷裡記錄，判定發散時凍結。放 L2，L1 留給延遲線與係數
 #define ANC_DIAG_TICK ((ANC_DIAG_TICK_MS * ANC_CORE_FS) / 1000u)   // 每筆的核心取樣數
@@ -185,6 +195,12 @@ void ANC_Init(void)
     out_gain     = 1.0f;
     quiet_samples = 0u;
     trip_reason  = ANC_TRIP_NONE;
+    out_req      = true;
+    out_prev     = true;
+    sw_gain      = 1.0f;
+    off_quiet    = 0u;
+    off_seconds  = 0.0f;
+    auto_off_done = false;
 #if ANC_DIAG
     diag_snap_idx = 0u;
     diag_snap_n   = 0u;
@@ -296,9 +312,25 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         x_history[anc_buf_idx] = u_hat_n;
         x_history[anc_buf_idx + ANC_X_HIST_SIZE] = u_hat_n;
 
-        // 4. 【抗噪波卷積】y(n) = W * X
+        // 3b. 喇叭輸出開關的切換 (ANC_Set_Output / ANC_AUTO_OFF_S)。這個取樣一律用 on_req，main loop 中途改寫也一致
+        bool on_req = out_req;
+        if (on_req != out_prev)
+        {
+            out_prev  = on_req;
+            off_quiet = 0u;
+            if (!on_req)
+            {
+                off_seconds = (float)run_samples / (float)ANC_CORE_FS;
+#if ANC_DIAG
+                if (dg_n > 0u) diag_store();   // 關閉前不滿一筆的最後一段
+#endif
+            }
+        }
+
+        // 4. 【抗噪波卷積】y(n) = W * X。發散保護淡出完，或開關關上且淡出完，y = 0 (不必算)
         const float *px = &x_history[anc_buf_idx + ANC_X_HIST_SIZE]; // 指向 x(n)
-        float y_n = (out_gain > 0.0f) ? fir_conv_2048(w_coeffs, px - (ANC_W_TAPS - 1)) : 0.0f;  // 發散保護淡出完 y = 0
+        bool live = (out_gain > 0.0f) && (on_req || (sw_gain > 0.0f));
+        float y_n = live ? fir_conv_2048(w_coeffs, px - (ANC_W_TAPS - 1)) : 0.0f;
 
         // [P0 修正]: 必須先限幅，才能寫入反饋歷史。否則估計的反饋波形與實際喇叭播出的波形會產生致命偏差！
         if (y_n != y_n)   // NaN 熔斷保護: W 已經壞了，交給發散保護
@@ -307,7 +339,7 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             if (trip_reason == ANC_TRIP_NONE) anc_trip(ANC_TRIP_NAN);
         }
 #if ANC_DIAG
-        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE))   // 快照: ANC 運轉中一直覆寫，判定後凍結
+        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE) && on_req)   // 快照: 輸出開著時一直覆寫，判定或關閉時凍結
         {
             uint32_t j = diag_snap_idx;
             diag_snap[0u * ANC_DIAG_SNAP + j] = x_n;       // 參考麥 (回授中和前)
@@ -328,7 +360,7 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             n_clip++;
         }
 #if ANC_DIAG
-        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE))   // 每 ANC_DIAG_TICK_MS 一筆的統計
+        if ((wait_samples == 0u) && (trip_reason == ANC_TRIP_NONE) && on_req)   // 每 ANC_DIAG_TICK_MS 一筆的統計
         {
             dg_n++;
             if (clipped) dg_clip++;
@@ -342,8 +374,9 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         }
 #endif
 
-        // 4b. 發散保護 (anc_fxnlms.h 的 ANC_TRIP_*): ANC 啟動後追蹤截斷比例、過零率與 |y| 峰值；判定後 y 淡出到 0
-        if ((trip_reason == ANC_TRIP_NONE) && (wait_samples == 0u))
+        // 4b. 發散保護 (anc_fxnlms.h 的 ANC_TRIP_*): ANC 啟動後追蹤截斷比例、過零率與 |y| 峰值；判定後 y 淡出到 0。
+        //     只在輸出完全打開時累計 (關閉與淡入淡出期間 W 停住，平均值保留)
+        if ((trip_reason == ANC_TRIP_NONE) && (wait_samples == 0u) && on_req && (sw_gain >= 1.0f))
         {
             bool neg = (y_n < 0.0f);
             clip_avg += ANC_TRIP_ALPHA * ((clipped ? 1.0f : 0.0f) - clip_avg);
@@ -366,7 +399,22 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
             }
         }
 
-        // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅後的 y_n)
+        // 4c. 喇叭輸出開關: sw_gain 在 ANC_SWITCH_FADE_MS 內線性淡入 / 淡出
+        y_n *= sw_gain;
+        if (on_req)
+        {
+            sw_gain = (sw_gain < 1.0f - ANC_SWITCH_STEP) ? (sw_gain + ANC_SWITCH_STEP) : 1.0f;
+        }
+        else if (sw_gain > 0.0f)
+        {
+            sw_gain = (sw_gain > ANC_SWITCH_STEP) ? (sw_gain - ANC_SWITCH_STEP) : 0.0f;
+        }
+        else if (off_quiet < ANC_TRIP_QUIET_SAMPLES)
+        {
+            off_quiet++;   // 升頻濾波器的拖尾和 DMA 緩衝都歸零後，main loop 才印
+        }
+
+        // 5. 雙鏡像更新抗噪輸出歷史 (寫入限幅、乘過保護與開關增益後實際送出的 y_n)
         y_history[y_buf_idx] = y_n;
         y_history[y_buf_idx + ANC_Y_HIST_SIZE] = y_n;
         if (++y_buf_idx >= ANC_Y_HIST_SIZE) y_buf_idx = 0;
@@ -388,7 +436,8 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
         //    漏洩累積後每 ANC_LEAK_INTERVAL 個取樣統一套用，防止阻帶發散
         if (wait_samples == 0u)
         {
-            if (trip_reason == ANC_TRIP_NONE)   // 判定發散後 W 停住，保留當時的值
+            // 判定發散後 W 停住，保留當時的值；輸出關閉與淡入淡出期間也停住 (誤差麥聽不到完整的輸出)
+            if ((trip_reason == ANC_TRIP_NONE) && on_req && (sw_gain >= 1.0f))
             {
                 float p_eff = px_power * (float)ANC_W_TAPS + ANC_EPSILON;
                 float grad_step = -(ANC_MU / p_eff) * e_n;
@@ -403,6 +452,13 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
                 }
             }
             if (run_samples != 0xFFFFFFFFu) run_samples++;
+#if (ANC_AUTO_OFF_S > 0u)
+            if (!auto_off_done && (run_samples >= ANC_AUTO_OFF_S * ANC_CORE_FS))
+            {
+                auto_off_done = true;
+                out_req = false;   // 下一個取樣開始淡出 (3b)
+            }
+#endif
         }
         else
         {
@@ -463,6 +519,7 @@ void ANC_Get_Status(ANC_Status *st)
 
     st->running = (wait_samples == 0u);
     st->tripped = (trip_reason != ANC_TRIP_NONE);
+    st->output_on = out_req;
     st->seconds = st->running ? (float)run_samples / (float)ANC_CORE_FS
                               : -(float)wait_samples / (float)ANC_CORE_FS;
     st->p_x     = px_power * (float)ANC_W_TAPS;
@@ -492,6 +549,37 @@ bool ANC_Get_Trip(ANC_Trip *t)
 bool ANC_Trip_Pending(void)
 {
     return (trip_reason != ANC_TRIP_NONE) && (quiet_samples < ANC_TRIP_QUIET_SAMPLES);
+}
+
+/** @brief 打開 / 關閉喇叭輸出。中斷在下一個取樣看到後淡入或淡出 (ANC_SWITCH_FADE_MS)，關閉期間 W 停住 */
+void ANC_Set_Output(bool on)
+{
+    out_req = on;
+}
+
+bool ANC_Output_Requested(void)
+{
+    return out_req;
+}
+
+ANC_State ANC_Get_State(void)
+{
+    if (trip_reason != ANC_TRIP_NONE) return ANC_STATE_TRIPPED;
+    if (wait_samples != 0u)           return ANC_STATE_WAIT;
+    return out_req ? ANC_STATE_ON : ANC_STATE_OFF;
+}
+
+/** @brief 輸出已關、淡出完並維持 0 ANC_TRIP_QUIET_MS。off_quiet 在每次切換時歸零，剛要求關閉時不會誤報 */
+bool ANC_Output_Quiet(void)
+{
+    return !out_req && (off_quiet >= ANC_TRIP_QUIET_SAMPLES);
+}
+
+bool ANC_Get_Auto_Off(float *seconds)
+{
+    if (!auto_off_done || !ANC_Output_Quiet()) return false;
+    *seconds = off_seconds;
+    return true;
 }
 
 #if ANC_DIAG

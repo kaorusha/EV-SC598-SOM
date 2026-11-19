@@ -74,6 +74,27 @@
 #define ANC_TRIP_FADE_MS        5u
 #define ANC_TRIP_QUIET_MS       10u      // 升頻濾波器拖尾約 1 ms、DMA 緩衝 4 個取樣，這個值留足餘裕
 
+// 喇叭輸出開關 (ANC_Set_Output；ANC_AUTO_OFF_S 也經過它):
+//   - 關: y 在 ANC_SWITCH_FADE_MS 內線性淡出到 0，之後不再算 W 的卷積
+//   - 開: 用停住的 W 淡入，已收斂的音調馬上消掉，不必重新收斂
+//   - 只有完全打開時 W 才更新、發散保護才累計。關閉與淡入淡出期間 W 停住: 這時誤差麥聽不到 (或聽不完整) 輸出，
+//     繼續更新 W 只會一直變大。拔喇叭功放的電源當開關就是這種情形，接回時會以限幅大小輸出
+//   - 回授歷史記錄實際送出的 y (乘過開關增益)，F̂ 的回授中和在開關前後都正確
+#define ANC_SWITCH_FADE_MS  50u
+
+// 定時關閉 (診斷用): ANC 啟動後這麼多秒把輸出關掉 (淡出、W 停住)。main loop 等輸出歸零後印 [ANC OFF]；ANC_DIAG 開著
+// 時接著印狀態歷史，並寫出關閉前最後 ANC_DIAG_SNAP 個取樣，不必等發散判定就看得到 y。之後輸出一直是關的，
+// CCES_runner 結束後核心照跑也不會無人看管地繼續 ANC。0 = 不關
+#define ANC_AUTO_OFF_S      0u
+
+typedef enum
+{
+    ANC_STATE_WAIT = 0, // ANC_START_DELAY_S 的等待期間
+    ANC_STATE_ON,       // 輸出打開 (或正在淡入)
+    ANC_STATE_OFF,      // 輸出關閉 (或正在淡出)，W 停住
+    ANC_STATE_TRIPPED   // 發散保護已判定
+} ANC_State;
+
 typedef enum
 {
     ANC_TRIP_NONE = 0,
@@ -104,6 +125,7 @@ typedef struct
 {
     bool     tripped;   // 發散保護已判定，喇叭靜音 (ANC_TRIP_*)
     bool     running;   // false: 還在 ANC_START_DELAY_S 的等待期間 (y = 0)
+    bool     output_on; // false: 輸出被開關關掉 (ANC_Set_Output / ANC_AUTO_OFF_S)，W 停住
     float    seconds;   // 啟動後的秒數 (等待中為負值: 距離啟動還有幾秒)
     uint32_t samples;   // 這段期間的核心取樣數
     uint32_t clipped;   // 其中 y 被限幅的取樣數
@@ -114,11 +136,12 @@ typedef struct
     float    w_energy;  // sum w^2 (持續變大 = 發散)
 } ANC_Status;
 
-// 診斷紀錄 (ANC_DIAG): ANC 運轉時不能 printf (JTAG 暫停會讓輸出卡住)，所以先存在 L2，判定發散、輸出歸零之後
-// 才由 main loop 印出並經 JTAG 寫檔 (Audio_Talkthrough_I2S.c 的 Diag_Report)。沒有判定就不輸出
+// 診斷紀錄 (ANC_DIAG): ANC 運轉時不能 printf (JTAG 暫停會讓輸出卡住)，所以先存在 L2，判定發散或定時關閉
+// (ANC_AUTO_OFF_S)、輸出歸零之後才由 main loop 印出並經 JTAG 寫檔 (Audio_Talkthrough_I2S.c 的 Diag_Report)。
+// 兩者都沒發生就不輸出
 //   - 每 ANC_DIAG_TICK_MS 一筆: 限幅前 |y| 的峰值、被限幅的比例、x / F̂y / u / y / e 的均方值、W2，保留最近 ANC_DIAG_HIST 筆
 //   - 最近 ANC_DIAG_SNAP 個核心取樣的 x (參考麥)、F̂y (回授估計)、u (帶通後、送進 W 的參考)、限幅前的 y、e (誤差麥)，
-//     判定時凍結
+//     判定或關閉輸出時凍結 (輸出關著時不記錄)
 // 起因: 2026-11-17 實驗室 400-5000 Hz 實測 17.5 s 後判定 (一半取樣被限幅，約 3573 Hz)，誤差麥上卻看不到任何頻率
 // 變大。要看到 y 本身，才分得出是輸出不夠 (W 越加越大) 還是 y 裡有誤差麥聽不到的成分
 #define ANC_DIAG             1
@@ -148,6 +171,11 @@ bool ANC_Is_Running(void);              // ANC_START_DELAY_S 過了沒
 void ANC_Get_Status(ANC_Status *st);    // 讀出並清除這段期間的統計 (main loop 呼叫，非中斷)
 bool ANC_Get_Trip(ANC_Trip *t);         // 已判定發散且輸出已靜音時回傳 true，並填入判定當時的數值 (main loop 呼叫)
 bool ANC_Trip_Pending(void);            // 已判定、輸出還沒靜音 (淡出中): 這時不要 printf
+void ANC_Set_Output(bool on);           // 打開 / 關閉喇叭輸出 (main loop 呼叫；淡入淡出在中斷裡做)
+bool ANC_Output_Requested(void);        // 目前要求的開關狀態 (ANC_AUTO_OFF_S 關掉後是 false)
+ANC_State ANC_Get_State(void);
+bool ANC_Output_Quiet(void);            // 輸出已關、淡出完並維持 0 ANC_TRIP_QUIET_MS: 這時 printf 不會讓輸出卡住
+bool ANC_Get_Auto_Off(float *seconds);  // ANC_AUTO_OFF_S 已關掉輸出且已歸零時回傳 true，並填入關閉時 ANC 啟動後的秒數
 #if ANC_DIAG
 uint32_t ANC_Diag_History(const ANC_Diag_Rec **ring);             // 已記錄的筆數；第 i 筆在 ring[i % ANC_DIAG_HIST]
 uint32_t ANC_Diag_Snapshot(const float **sig, uint32_t *oldest);  // 快照的有效取樣數；訊號 s 的第 j 個在

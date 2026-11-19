@@ -376,9 +376,10 @@ static const char *Host_Path(const char *rel)
 #endif
 
 #if ANC_DIAG_REPORT
-/* Divergence diagnostics (ANC_DIAG, anc_fxnlms.h), once after a trip. The output is 0 by then, so the JTAG halts of
- * printf and the file write are silent. The status history goes to the console; the last ANC_DIAG_SNAP core samples
- * before the trip go to ANC_DIAG_FILE, one line per sample: x, F^y, u, y before the clamp, e (full scale = 1). */
+/* Divergence diagnostics (ANC_DIAG, anc_fxnlms.h), once after a trip or the timed switch-off (ANC_AUTO_OFF_S). The
+ * output is 0 by then, so the JTAG halts of printf and the file write are silent. The status history goes to the
+ * console; the last ANC_DIAG_SNAP core samples before the trip or switch-off go to ANC_DIAG_FILE, one line per
+ * sample: x, F^y, u, y before the clamp, e (full scale = 1). */
 static void Diag_Report(void)
 {
 	const ANC_Diag_Rec *ring;
@@ -388,8 +389,8 @@ static void Diag_Report(void)
 	uint32_t n = ANC_Diag_History(&ring);
 	uint32_t i, oldest, ns;
 
-	printf("[DIAG] status every %u ms up to the trip, dB re full scale: x = Ref, Fy = feedback estimate, u = into W, "
-		   "y = after the clamp, e = Err\n", ANC_DIAG_TICK_MS);
+	printf("[DIAG] status every %u ms up to the trip or switch-off, dB re full scale: x = Ref, Fy = feedback estimate, "
+		   "u = into W, y = after the clamp, e = Err\n", ANC_DIAG_TICK_MS);
 	for (i = (n > ANC_DIAG_HIST) ? (n - ANC_DIAG_HIST) : 0u; i < n; i++)
 	{
 		const ANC_Diag_Rec *r = &ring[i % ANC_DIAG_HIST];
@@ -400,7 +401,7 @@ static void Diag_Report(void)
 	}
 	ns = ANC_Diag_Snapshot(&sig, &oldest);
 	path = Host_Path(ANC_DIAG_FILE);
-	printf("[DIAG] writing the last %u samples before the trip to %s\n", ns, path);
+	printf("[DIAG] writing the last %u samples before the trip or switch-off to %s\n", ns, path);
 	fflush(stdout);
 	fp = fopen(path, "w");
 	if (fp == NULL)
@@ -409,7 +410,8 @@ static void Diag_Report(void)
 		fflush(stdout);
 		return;
 	}
-	fprintf(fp, "# ANC_DIAG snapshot: the last %u ANC core samples (48 kHz) before the divergence trip\n", ns);
+	fprintf(fp, "# ANC_DIAG snapshot: the last %u ANC core samples (48 kHz) before the divergence trip or the "
+			"timed switch-off\n", ns);
 	fprintf(fp, "# columns: x (Ref), Fy (feedback estimate), u (into W), y (before the clamp), e (Err); full scale = 1\n");
 	for (i = 0u; i < ns; i++)
 	{
@@ -1476,8 +1478,12 @@ int main(int argc, char *argv[])
 #if (ANC_PRINTS_AFTER_START == 0)
 		printf(">>> No status prints while ANC runs (JTAG printf would freeze the output), back after a trip\n");
 #endif
+#if (ANC_AUTO_OFF_S > 0u)
+		printf(">>> Output switched off %u s after the ANC start (ANC_AUTO_OFF_S), W frozen; it stays off\n",
+			   ANC_AUTO_OFF_S);
+#endif
 #if ANC_DIAG_REPORT
-		printf(">>> Diagnostics: after a trip, status every %u ms and the last %u samples (%s)\n",
+		printf(">>> Diagnostics: after a trip or the timed switch-off, status every %u ms and the last %u samples (%s)\n",
 			   ANC_DIAG_TICK_MS, ANC_DIAG_SNAP, ANC_DIAG_FILE);
 #endif
 		printf(">>> Output Jack J18:    Left = Mute, Right = Anti-noise y(n)\n");
@@ -1599,6 +1605,7 @@ int main(int argc, char *argv[])
 #if (APP_MODE == APP_MODE_ANC)
 		int runPrints = 0;   /* prints since ANC started */
 		int tripPrinted = 0; /* [ANC TRIP] is out; the periodic prints come back (the speaker is muted) */
+		int offPrinted = 0;  /* [ANC OFF] (ANC_AUTO_OFF_S) is out; the periodic prints come back (the output stays off) */
 #endif
 #if ENABLE_CYCLE_METER
 		cycle_t lastStamp;
@@ -1633,6 +1640,21 @@ int main(int argc, char *argv[])
 					tripPrinted = 1;
 				}
 			}
+			/* Timed switch-off (ANC_AUTO_OFF_S): ANC_Get_Auto_Off waits until the output has faded out and stayed 0 */
+			if (!offPrinted && !tripPrinted)
+			{
+				float offSeconds;
+				if (ANC_Get_Auto_Off(&offSeconds))
+				{
+					printf("\n[ANC OFF] Output switched off %.1f s after ANC started (ANC_AUTO_OFF_S), W frozen.\n\n",
+						   offSeconds);
+					fflush(stdout);
+#if ANC_DIAG_REPORT
+					Diag_Report();
+#endif
+					offPrinted = 1;
+				}
+			}
 #endif
 			if ((uint32_t)(TestCallbackCount - lastCount) >= PEAK_METER_CALLBACKS)
 			{
@@ -1644,8 +1666,8 @@ int main(int argc, char *argv[])
 					continue;
 				}
 				/* Quiet once ANC has run for ANC_PRINTS_AFTER_START prints: JTAG printf halts the core -> clicks.
-				 * After a divergence trip the speaker is muted, so printing resumes */
-				if (ANC_Is_Running() && !tripPrinted)
+				 * After a divergence trip or the timed switch-off the speaker gets 0, so printing resumes */
+				if (ANC_Is_Running() && !tripPrinted && !offPrinted)
 				{
 					if ((ANC_PRINTS_AFTER_START >= 0) && (runPrints >= ANC_PRINTS_AFTER_START))
 					{
@@ -1689,7 +1711,7 @@ int main(int argc, char *argv[])
 					ANC_Get_Status(&st);
 					/* Fields are explained at ENABLE_ANC_STATUS */
 					printf("[ANC #%u] %s t=%+.1f s  ref=%.1f err=%.1f dB  Px'=%.2e  y_pk=%.3f clip=%u/%u  W2=%.3e\n",
-						   lastCount, st.tripped ? "trip" : (st.running ? "run " : "wait"), st.seconds,
+						   lastCount, st.tripped ? "trip" : (!st.running ? "wait" : (st.output_on ? "run " : "off ")), st.seconds,
 						   10.0f * log10f(st.ref_ms + 1e-30f), 10.0f * log10f(st.err_ms + 1e-30f),
 						   st.p_x, st.y_peak, st.clipped, st.samples, st.w_energy);
 					fflush(stdout);
