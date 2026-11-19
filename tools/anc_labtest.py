@@ -16,6 +16,7 @@ that load and switch it on before ANC starts (ANC_START_DELAY_S after boot). A r
   python tools/anc_labtest.py report <wav> [<wav> ...] [--labels ...] [--out DIR] [--name PREFIX]
                                                          slide figures for 1-3 runs (below)
   python tools/anc_labtest.py diag <wav>                 ANC_DIAG output after a divergence trip ([DIAG] lines, snapshot)
+  python tools/anc_labtest.py track <wav> [--step S]     second by second: fan f0 and tones, frozen J17 L (dumps)
   python tools/anc_labtest.py synth <wav>                synthetic recording to test the analysis
 
 The CrossCore Embedded Studio folder (CCES_runner.exe, SHARC/ldr/ezkitSC598W_preload_core1.dxe) comes from --cces or
@@ -861,6 +862,43 @@ def plot_switches(base, m):
     plt.close(fig)
 
 
+def track(wav, step=1.0):
+    """Second by second (1 s Hann windows every `step` s, from 5 s before the ANC start), for when the attenuation does
+    something odd. Answers "did the fan change, or the recording?". Prints and writes <name> track.txt with:
+    - the strongest peak within +-15% of f0 and of 6 f0 (fan speed) and their levels;
+    - the 2 f0 line, the 7-12 kHz band and the total;
+    - how much of the window J17 L was frozen: a status print or the diagnostics dump after a trip or the timed
+      switch-off. Those seconds are not the Err mic: on 2026-11-19 a 14 s dump looked like a recording 7 dB quieter."""
+    base, x, meta, log = load_run(wav)
+    t_r, t_x = meta['runner_start_s'], meta['runner_exit_s']
+    ta = meta['anc_start_s'] if 'anc_start_s' in meta else find_anc_start(x, log, t_r, t_x)[0]
+    f, p_off, _ = mean_psd(x, ta - 10.5, ta - 0.5)
+    f0, _ = find_f0(f, p_off, *F0_RANGE)
+    a0, n = ta - 5.0, FS
+    okm = frozen_free(x, a0, x.size / FS)
+    w = np.hanning(n)
+    fr = np.fft.rfftfreq(n, 1 / FS)
+    L = [f'{Path(wav).name}: ANC start {ta:.2f} s, f0 {f0:.2f} Hz (ANC off); levels in dBFS (power), tones = 5 bins',
+         '  t re start   f0 peak Hz  f0 dB  6f0 peak Hz  6f0 dB  2f0 dB  7-12k dB  total dB  frozen']
+    for a in np.arange(a0, x.size / FS - 1.0, step):
+        i0 = int(a * FS)
+        p = np.abs(np.fft.rfft(x[i0:i0 + n] * w)) ** 2 * 2 / (np.sum(w ** 2) * n)
+
+        def peak(fc):
+            idx = np.flatnonzero((fr >= 0.85 * fc) & (fr <= 1.15 * fc))
+            i = idx[np.argmax(p[idx])]
+            return fr[i], 10 * np.log10(p[i - 2:i + 3].sum() + 1e-30)
+        band = lambda lo, hi: 10 * np.log10(p[(fr >= lo) & (fr < hi)].sum() + 1e-30)   # noqa: E731
+        (f1, l1), (f6, l6) = peak(f0), peak(6 * f0)
+        j0 = i0 - int(a0 * FS)
+        frozen = 100 * (1 - okm[j0:j0 + n].mean())
+        L.append(f'  {a - ta:+10.1f}   {f1:10.1f} {l1:6.1f}  {f6:11.1f} {l6:7.1f} {band(2 * f0 - 6, 2 * f0 + 7):7.1f} '
+                 f'{band(7000, 12000):9.1f} {band(60, 20000):9.1f}  {frozen:4.0f}%')
+    txt = '\n'.join(L)
+    print(txt)
+    Path(str(base) + ' track.txt').write_text(txt + '\n', encoding='utf-8')
+
+
 # ---------------------------------------------------------------- slide figures
 
 C_RUN = ('#2a6fdb', '#e8702a', '#5b2c83')    # runs in this fixed order; OKLab CVD checks pass for every pair and C_OFF
@@ -1301,6 +1339,9 @@ def main():
     p.add_argument('--title', help='title of the bar chart')
     d = sub.add_parser('diag')
     d.add_argument('wav')
+    k = sub.add_parser('track', help='second by second: fan f0 and tones, 7-12 kHz, total, frozen J17 L')
+    k.add_argument('wav')
+    k.add_argument('--step', type=float, default=1.0, help='seconds between the 1 s windows')
     s = sub.add_parser('synth')
     s.add_argument('wav')
     a = ap.parse_args()
@@ -1315,6 +1356,8 @@ def main():
         report(a.wav, a.labels, a.f0, a.out, a.name, a.title)
     elif a.cmd == 'diag':
         diag(a.wav)
+    elif a.cmd == 'track':
+        track(a.wav, a.step)
     else:
         synth(a.wav)
 
