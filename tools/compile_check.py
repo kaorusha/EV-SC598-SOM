@@ -31,6 +31,7 @@ VARIANTS = {
     'as-is': {},
     'anc-diag-off': {'ANC_DIAG': '0'},
     'band-none': {'ANC_REF_BAND': 'ANC_REF_BAND_NONE'},
+    'band-400-1500': {'ANC_REF_BAND': 'ANC_REF_BAND_400_1500'},
     'band-400-5000': {'ANC_REF_BAND': 'ANC_REF_BAND_400_5000'},
     'auto-off': {'ANC_AUTO_OFF_S': '90u'},
     'auto-off-no-diag': {'ANC_AUTO_OFF_S': '90u', 'ANC_DIAG': '0'},

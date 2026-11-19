@@ -25,7 +25,8 @@
 #define ANC_REF_BAND_NONE       0   // 不濾波
 #define ANC_REF_BAND_400_1500   1   // 100% duty 只消 600 Hz。第一次 ANC 實測先用這個
 #define ANC_REF_BAND_400_5000   2   // 30-100% duty 的轉速音與 BPF (100% duty 的 BPF 要 y 約 0.7，限幅 0.9 夠用)
-#define ANC_REF_BAND            ANC_REF_BAND_400_1500
+#define ANC_REF_BAND_400_4000   3   // 400-5000 的上緣降到 4 kHz: 10.8 kHz 從 -34.6 降到 -43.7 dB，3.6 kHz -1.3 dB
+#define ANC_REF_BAND            ANC_REF_BAND_400_4000   // 2026-11-18 實驗室: 每個音調都比 400-5000 消得多
 
 // 正規化步長 mu: w -= mu * e * x' / (ANC_W_TAPS * x' 功率 + ANC_EPSILON)，不另設上限
 // (舊的步長上限 0.005 加上 ANC_EPSILON 0.005，讓步長固定在 0.005、W 幾乎不動，已移除)
@@ -38,6 +39,10 @@
 #elif (ANC_REF_BAND == ANC_REF_BAND_400_5000)
 #define ANC_REF_BAND_NAME   "400-5000 Hz"
 #define ANC_MU              0.01f    // 各音調的穩定上限最小約 0.033 (30% duty 的 1132 Hz)；FxNLMS.py 模擬 30-100% duty 都穩定
+#elif (ANC_REF_BAND == ANC_REF_BAND_400_4000)
+#define ANC_REF_BAND_NAME   "400-4000 Hz"
+#define ANC_MU              0.01f    // 同 400-5000。400-5000 時 W 從帶通上緣學到 10.8 kHz (18 f0)，2026-11-17 誤差麥
+                                     // 7-12 kHz 變大 3-5.6 dB；4 kHz 上緣讓 y 的 18 f0 少 22 dB (2026-11-18 實測)
 #else
 #error "unknown ANC_REF_BAND"
 #endif
