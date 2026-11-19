@@ -11,7 +11,8 @@ that load and switch it on before ANC starts (ANC_START_DELAY_S after boot). A r
 
   python tools/anc_labtest.py check                      silent: build time, US205, Windows volume, input level now
   python tools/anc_labtest.py run --name "1117 ANC fan100 band400-1500" [--timeout 100] [--notes "..."] [--cces DIR]
-  python tools/anc_labtest.py analyze <wav> [--f0 HZ]    again, from the saved files
+                                  [--buttons]            pushbutton test: SW4 / SW3 edges and convergence (below)
+  python tools/anc_labtest.py analyze <wav> [--f0 HZ] [--buttons]   again, from the saved files
   python tools/anc_labtest.py report <wav> [<wav> ...] [--labels ...] [--out DIR] [--name PREFIX]
                                                          slide figures for 1-3 runs (below)
   python tools/anc_labtest.py diag <wav>                 ANC_DIAG output after a divergence trip ([DIAG] lines, snapshot)
@@ -35,6 +36,24 @@ in the log), ANC on ends 0.5 s before the trip, since the guard muted the speake
 (ANC_AUTO_OFF_S, "[ANC OFF] Output switched off ... s after ANC started") ends it the same way. With ANC_AUTO_OFF_S,
 give run a --timeout that covers the ANC start (about 31 s after the runner start), ANC_AUTO_OFF_S and the
 diagnostics dump that follows.
+
+Output switches (SW4 output off/on, SW3 restart) leave no line in the log: the firmware prints nothing while ANC runs.
+They show in the recording instead. The tones that ANC reduced go back to their ANC-off level while the output is off
+and come down again when it is on. switch_analysis follows the envelopes of those tones (complex demodulation, 20 Hz
+low-pass) and lists each edge. For each rise it gives the time each tone took to get 10 dB quieter (or its steady
+attenuation - 3 dB, when that is less), counted from:
+- the ANC start;
+- the cut of an SW3 restart: W = 0 sends y to 0 at once, so the tones jump up first; an off stretch shorter than
+  1.5 s counts as a restart;
+- the moment the tones left their off level, for SW4 on. SW3 pressed while off looks the same, since its press
+  leaves no trace.
+It also checks each edge for a transient (2 ms rms in 5-20 kHz against the largest one in the 2 s before) and gives
+the levels of each on and off stretch. The ANC-on windows leave out the off stretches and 1 s after each rise.
+Edges after the start are looked for only in a pushbutton test: run --buttons, which the .json keeps, or
+analyze --buttons. Otherwise only the start counts, because with one or two reduced tones the attenuation dips to
+the ANC-off level now and then while ANC runs. With the 400-4000 band (three tones) no such dip was seen in 120 s.
+For a pushbutton test, also give run a --timeout that covers the presses (e.g. 150). Wait 10 s after the ANC start
+(LED9 steady) before the first press, and about 10 s between presses.
 
 Report slides show each result twice: as bars (easy to read) and as the Err spectrum with ANC off and on (where the
 change is, including what got louder). "report" writes both, plus the attenuation over time, for up to 3 runs side
@@ -82,6 +101,20 @@ INK, GRID = '#222222', '#e3e3e3'
 C_OFF, C_ON = '#7a7a7a', '#2a6fdb'
 C_COMP = {'f0': '#159a85', '2 f0': '#d9822b', '6 f0': '#8e44ad', '7-12 kHz': '#b07d12', 'total': '#7a7a7a'}
 C_TRIP = '#c0392b'
+ENV_LP = 20.0              # tone envelopes: complex demodulation, then a zero-phase low-pass at this many Hz
+ENV_FS = 1000              # envelope sample rate (Hz)
+SW_PICK_DB = 5.0           # tones this much quieter 1-9 s after the ANC start mark the output state
+SW_OFF_DB = 3.0            # output off: those tones within this of their ANC-off level (their mean in dB), ...
+SW_FLOOR_DB = 1.5          # ... coming this close at least once and staying within SW_OFF_DB for SW_MIN_OFF_S;
+SW_MIN_OFF_S = 0.01        # anything less is a dip of the attenuation, not an off. An SW3 press while on keeps y at 0
+                           # only for the 50 ms fade and W converges within tens of ms: in the 20 Hz envelopes the
+                           # tones stay within 3 dB of the ANC-off level for just 13-19 ms (2026-11-19)
+SW_MED_S = 0.02            # running median of the mean attenuation before the on/off decision
+SW_DIP_S = 1.5             # off for less than this, then on again: a restart (SW3) while the output was on
+CONV_DB = 10.0             # convergence: CONV_DB quieter, or the steady attenuation - 3 dB when that is less
+CLICK_BAND = (5000.0, 20000.0)   # edge transient: 2 ms rms in this band
+C_TONE = {'f0': '#159a85', '2 f0': '#2a6fdb', '5 f0': '#b07d12', '6 f0': '#8e44ad', 'mean': '#3d3d3d'}
+SW_KINDS = ('output off', 'output on', 'restart (SW3)')   # edges made by the pushbuttons
 
 
 def db(v):
@@ -194,7 +227,8 @@ def run(a):
     Path(str(base) + '.log').write_text(out, encoding='utf-8')
     meta = dict(fs=FS, started=wall_start, runner_start_s=round(to_s(t_start), 3),
                 runner_exit_s=round(to_s(t_exit), 3), runner_rc=rc, runner_timeout_s=a.timeout,
-                runner_cmd=subprocess.list2cmdline(cmd), xruns=flags, source=pm.git_state(), notes=a.notes, **info)
+                runner_cmd=subprocess.list2cmdline(cmd), xruns=flags, source=pm.git_state(), notes=a.notes,
+                buttons=a.buttons, **info)
     Path(str(base) + '.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
     print('Saved', base.name, '.wav/.log/.json')
     if DIAG_FILE.exists() and DIAG_FILE.stat().st_mtime > t_wall0:
@@ -222,16 +256,19 @@ def frozen_free(x, a, b):
     return np.concatenate([m, np.ones(seg.size - m.size, bool)])
 
 
-def mean_psd(x, a, b, skip_frozen=True):
+def mean_psd(x, a, b, skip_frozen=True, exclude=()):
     """Mean one-sided PSD (FS^2/Hz) of 0.5 s Hann segments in [a, b) s; with skip_frozen, segments that touch a frozen
-    stretch are left out. Returns f, psd, number of segments."""
-    seg = x[max(int(a * FS), 0):int(b * FS)]
+    stretch are left out, and so are segments that touch an `exclude` stretch (lo, hi) in s. Returns f, psd, number
+    of segments."""
+    i_a = max(int(a * FS), 0)
+    seg = x[i_a:int(b * FS)]
     ok = frozen_free(x, a, b) if skip_frozen else np.ones(seg.size, bool)
     w = np.hanning(SEG)
     norm = FS * np.sum(w ** 2)
     acc, n = np.zeros(SEG // 2 + 1), 0
     for i in range(0, seg.size - SEG + 1, HOP):
-        if ok[i:i + SEG].all():
+        s0 = (i_a + i) / FS
+        if ok[i:i + SEG].all() and not any(s0 < hi and s0 + SEG / FS > lo for lo, hi in exclude):
             acc += 2 * np.abs(np.fft.rfft(seg[i:i + SEG] * w)) ** 2 / norm
             n += 1
     return np.fft.rfftfreq(SEG, 1 / FS), acc / max(n, 1), n
@@ -351,25 +388,205 @@ def find_anc_start(x, log, t_r, t_x):
                 f'{len(chain)} of {len(waits)} wait prints found{note}')
 
 
-def measure(wav, f0=None):
-    """PSDs, f0, the attenuation per window and the time course of one run, for analyze and report.
+# ---------------------------------------------------------------- output switches (SW4, SW3) and convergence
 
-    ANC on ends 0.5 s before a divergence trip (the guard muted the speaker there) or a timed switch-off."""
+def tone_env(x, freqs, a, b):
+    """Envelopes (squared amplitude, FS^2) of the tones at `freqs` Hz over [a, b) s: complex demodulation, then an
+    ENV_LP Hz zero-phase low-pass, sampled at ENV_FS. Returns t (s) and an array len(freqs) x len(t)."""
+    from scipy.signal import butter, sosfiltfilt
+    i0, i1 = max(int(a * FS), 0), min(int(b * FS), x.size)
+    k = np.arange(i0, i1)
+    sos = butter(4, ENV_LP, 'low', fs=FS, output='sos')
+    dec = FS // ENV_FS
+    env = []
+    for fq in freqs:
+        ph = 2 * np.pi * fq * k / FS
+        re_ = sosfiltfilt(sos, x[i0:i1] * np.cos(ph))[::dec]
+        im_ = sosfiltfilt(sos, x[i0:i1] * np.sin(ph))[::dec]
+        env.append(4 * (re_ ** 2 + im_ ** 2))
+    return k[::dec] / FS, np.array(env)
+
+
+def edge_click(x, t0, okmask, a0):
+    """Transient at an edge: the largest 2 ms rms in CLICK_BAND within +-30 ms of t0, in dB re the largest one in the
+    2 s before (above 0 = it stands out of the fan noise). okmask: frozen_free mask of the samples from a0 s on;
+    windows that touch a frozen stretch are left out. None near the ends of the recording."""
+    from scipy.signal import butter, sosfiltfilt
+    i0, i1 = int((t0 - 2.2) * FS), int((t0 + 0.1) * FS)
+    j0 = i0 - int(a0 * FS)
+    if j0 < 0 or i1 > x.size or j0 + (i1 - i0) > okmask.size:
+        return None
+    y = sosfiltfilt(butter(4, CLICK_BAND, 'bandpass', fs=FS, output='sos'), x[i0:i1])
+    n = int(0.002 * FS)
+    c = np.concatenate([[0.0], np.cumsum(y ** 2)])
+    r = np.sqrt((c[n:] - c[:-n]) / n)                        # 2 ms windows starting at each sample
+    bad = np.concatenate([[0], np.cumsum(~okmask[j0:j0 + (i1 - i0)])])
+    good = (bad[n:] - bad[:-n]) == 0
+    tc = (i0 + np.arange(r.size) + n / 2) / FS               # window centres
+    pre = r[good & (tc >= t0 - 2.1) & (tc < t0 - 0.1)]
+    at = r[good & (np.abs(tc - t0) <= 0.03)]
+    if pre.size < FS // 2 or not at.size:
+        return None
+    return float(20 * np.log10(at.max() / max(pre.max(), 1e-30)))
+
+
+def switch_analysis(x, ta, f0, band, t_end, stops, buttons=False):
+    """The tones ANC reduced and how fast they came down after the ANC start. With buttons (a pushbutton test: run
+    --buttons) also the output switches after it, all from the recording alone (see the module docstring). Without
+    buttons nothing after the start is read as a switch: with one or two reduced tones the attenuation dips to the
+    ANC-off level now and then while ANC runs, and those dips would pass for presses. stops: {label: s} from the
+    log's [ANC TRIP] / [ANC OFF] lines; the firmware counts these seconds from the last (re)start. Returns a dict;
+    it has only 'note' when there is nothing to follow."""
+    from scipy.ndimage import median_filter
+    ks = [k for k in (1, 2, 5, 6) if band is None or band[0] <= k * f0 <= band[1]]
+    names = ['f0' if k == 1 else f'{k} f0' for k in ks]
+    a0 = max(ta - 11.0, 0.0)
+    t, env = tone_env(x, [k * f0 for k in ks], a0, t_end)
+    okmask = frozen_free(x, a0, t_end)
+    w = int(0.03 * ENV_FS)                                   # 30 ms margins for the envelope low-pass
+    ok = np.convolve(~okmask[::FS // ENV_FS][:t.size], np.ones(2 * w + 1), 'same') == 0
+    pre = (t >= ta - 10.5) & (t < ta - 0.5) & ok
+    early = (t >= ta + 1.0) & (t < ta + 9.0) & ok
+    if pre.sum() < ENV_FS or early.sum() < ENV_FS:
+        return dict(note='less than 1 s of clean recording before the ANC start or 1-9 s after it')
+    A = 10 * np.log10(env[:, pre].mean(axis=1)[:, None] / np.maximum(env, 1e-30))   # dB, above 0 = quieter
+    st0 = np.median(A[:, early], axis=1)
+    pick = st0 >= SW_PICK_DB
+    if not pick.any():
+        return dict(note=f'no tone got {SW_PICK_DB:.0f} dB quieter 1-9 s after the ANC start ('
+                    + ', '.join(f'{n} {v:+.1f}' for n, v in zip(names, st0)) + ' dB)')
+    names, A, st0 = [n for n, p in zip(names, pick) if p], A[pick], st0[pick]
+    Am = A.mean(axis=0)
+    Ams = median_filter(Am, size=int(SW_MED_S * ENV_FS) | 1, mode='nearest')
+    Amax = median_filter(A.max(axis=0), size=int(SW_MED_S * ENV_FS) | 1, mode='nearest')   # off: every tone back
+    S = float(np.median(Am[early]))
+    thr_on = max(SW_PICK_DB, 0.5 * S)
+    mid = 0.5 * (thr_on + SW_OFF_DB)
+    i_a = int(np.searchsorted(t, ta))
+    first_stop = min([ta + s for s in stops.values() if s is not None], default=t_end)
+    trans, on = [], False          # indices where the state flips: on at even positions, off at odd ones
+    for i in range(i_a, t.size):
+        if not ok[i]:
+            continue               # frozen J17 L: keep the state
+        if not on and Ams[i] >= thr_on:
+            on = True
+            trans.append(i)
+            if not buttons:        # only the ANC start
+                break
+        elif on and Amax[i] <= SW_OFF_DB:
+            on = False
+            trans.append(i)
+    ignored, k = 0, 1              # an off must come close to the ANC-off level; a dip of the attenuation is no off
+    while k < len(trans):
+        sl = slice(trans[k], trans[k + 1] if k + 1 < len(trans) else t.size)
+        if (Am[sl][ok[sl]].min(initial=np.inf) <= SW_FLOOR_DB
+                and np.sum((Amax[sl] <= SW_OFF_DB) & ok[sl]) >= SW_MIN_OFF_S * ENV_FS):
+            k += 2
+        else:
+            del trans[k:k + 2]
+            ignored += 1
+
+    def cross(i, rising):          # time Ams crossed `mid` on the way to index i
+        if not rising and not ok[i - 1]:   # off right after a frozen stretch: the firmware prints only once the
+            j = i - 1                      # output is quiet (guard trip, timed switch-off), so the edge is where
+            while j > i_a and not ok[j - 1]:   # the stretch began
+                j -= 1
+            return float(t[j])
+        idx = np.flatnonzero(Ams[i_a:i + 1] < mid if rising else Ams[i_a:i + 1] > mid)
+        if not idx.size or i_a + idx[-1] >= i:
+            return float(t[i])
+        j = i_a + idx[-1]
+        v0, v1 = Ams[j], Ams[j + 1]
+        return float(t[j] + (mid - v0) / (v1 - v0) / ENV_FS) if v1 != v0 else float(t[j])
+
+    def left(i, rising):           # last time before index i at the old level (off for a rise, on for a fall)
+        idx = np.flatnonzero(Amax[i_a:i + 1] <= SW_OFF_DB if rising else Ams[i_a:i + 1] >= thr_on)
+        return float(t[i_a + idx[-1]]) if idx.size else float(t[i_a])
+
+    def converge(t_ref, i_on, t_lim):
+        """Per tone (steady, threshold, seconds from t_ref until it got that much quieter): steady = median 1-6 s after
+        the rise; the tone must first be above the threshold level (a restart sends it up), then get below it."""
+        out = {}
+        sm = (t >= t[i_on] + 1.0) & (t < min(t[i_on] + 6.0, t_lim - 0.2)) & ok
+        for j, nm in enumerate(names):
+            if sm.sum() < 0.3 * ENV_FS:
+                out[nm] = None
+                continue
+            st = float(np.median(A[j, sm]))
+            thr = min(CONV_DB, st - 3.0)
+            dt = None
+            if thr >= 3.0:                 # a tone that only gets a few dB quieter has no meaningful time
+                span = (t >= t_ref) & (t < t_lim) & ok
+                up = np.flatnonzero(span & (A[j] < thr))
+                if up.size:
+                    hit = np.flatnonzero(span & (A[j] >= thr) & (np.arange(t.size) > up[0]))
+                    dt = float(t[hit[0]] - t_ref) if hit.size else None
+            out[nm] = (st, thr, dt)
+        return out
+
+    edges = [(cross(i, n % 2 == 0), left(i, n % 2 == 0), i) for n, i in enumerate(trans)]   # (edge, left, index)
+    nxt_left = lambda n: edges[n][1] if n < len(edges) else t_end   # noqa: E731
+    events, starts, stop_times = [], [ta], {}
+    n = 0
+    while n < len(edges):
+        te, tl, i = edges[n]
+        if n % 2 == 0:                                      # a rise
+            if n == 0:
+                ev = dict(kind='ANC start', t=ta, t_ref=ta, ref='the ANC start')
+            else:
+                ev = dict(kind='output on', t=te, t_ref=tl, ref='the tones left the off level')
+                starts.append(tl)                           # SW3 while off restarts the firmware clock about here
+            ev['conv'] = converge(ev['t_ref'], i, nxt_left(n + 1) if buttons else min(ta + 10.0, first_stop))
+            n += 1
+        elif n + 1 < len(edges) and edges[n + 1][0] - te < SW_DIP_S:   # off briefly, then on: SW3 while on
+            ev = dict(kind='restart (SW3)', t=te, t_ref=te, ref='the cut', off_s=edges[n + 1][0] - te)
+            ev['conv'] = converge(te, edges[n + 1][2], nxt_left(n + 2))
+            starts.append(te)
+            n += 2
+        else:                                               # off for longer: SW4, the guard or the timed switch-off
+            ev = dict(kind='output off', t=te, t_ref=te, ref='the edge', fade_s=float(t[i]) - tl)
+            for lab, s in stops.items():   # a log line belongs to the first fall that fits a (re)start before it
+                if s is None or lab in stop_times:
+                    continue
+                cand = [c + s for c in starts if c < te and abs(c + s - te) < 0.6]
+                if cand:
+                    ev['kind'] = lab
+                    stop_times[lab] = min(cand, key=lambda v: abs(v - te))
+                    break
+            mm = (t >= t[i] + 0.3) & (t < nxt_left(n + 1) - 0.2) & ok
+            ev['off_db'] = float(np.median(Am[mm])) if mm.sum() >= 0.3 * ENV_FS else None
+            n += 1
+        ev['click'] = edge_click(x, ev['t'], okmask, a0)
+        events.append(ev)
+    segs, excl = [], []            # on / off stretches between the edges, and the off ones for the ANC-on windows
+    marks = [ta] + [e[0] for e in edges[1:]]
+    for n in range(len(edges)):
+        last = n + 1 >= len(edges)
+        if n % 2 == 0:
+            segs.append(('on', marks[n] + 1.0, t_end - 0.5 if last else marks[n + 1] - 0.2))
+        else:
+            segs.append(('off', marks[n] + 0.3, t_end - 0.5 if last else edges[n + 1][1] - 0.2))
+            excl.append((marks[n] - 0.3, np.inf if last else marks[n + 1] + 1.0))
+    return dict(names=names, t=t, A=np.where(ok, A, np.nan), Am=np.where(ok, Am, np.nan), thr_on=thr_on, S=S,
+                st0=st0, events=events, segments=segs, exclude=excl, stop_times=stop_times, ignored=ignored,
+                buttons=buttons)
+
+
+def measure(wav, f0=None, buttons=None):
+    """PSDs, f0, the attenuation per window, the time course and the output switches of one run, for analyze and
+    report. buttons: a pushbutton test (default: "buttons" in the .json, set by run --buttons).
+
+    ANC on ends 0.5 s before a divergence trip (the guard muted the speaker there) or a timed switch-off. In a
+    pushbutton test it also leaves out the stretches where the output was switched off (switch_analysis)."""
     base, x, meta, log = load_run(wav)
+    if buttons is None:
+        buttons = bool(meta.get('buttons', False))
     dur = x.size / FS
     t_r, t_x = meta['runner_start_s'], meta['runner_exit_s']
     if 'anc_start_s' in meta:   # set by hand in the .json
         ta, ta_how = meta['anc_start_s'], 'anc_start_s in the .json'
     else:
         ta, ta_how = find_anc_start(x, log, t_r, t_x)
-    stops = []   # (time in the recording, marker label, window after it, text)
-    if log['trip_s'] is not None:
-        stops.append((ta + log['trip_s'], 'guard trip', 'after the trip (muted)',
-                      f'The guard tripped {log["trip_s"]:.1f} s after the ANC start'))
-    if log['off_s'] is not None:
-        stops.append((ta + log['off_s'], 'switch-off', 'after the switch-off',
-                      f'The output was switched off {log["off_s"]:.1f} s after the ANC start'))
-    t_trip, stop_label, after_key, stop_text = min(stops) if stops else (None, None, None, None)
     f, p_off, n_off = mean_psd(x, ta - 10.5, ta - 0.5)
     if f0 is None:
         f0, prom = find_f0(f, p_off, *F0_RANGE)
@@ -377,6 +594,18 @@ def measure(wav, f0=None):
     else:
         f0_text = f'f0 {f0:.2f} Hz (given)'
     c_off = components(f, p_off, f0)
+    sw = switch_analysis(x, ta, f0, log['band'], dur, {'guard trip': log['trip_s'], 'timed switch-off': log['off_s']},
+                         buttons)
+    stops = []   # (time in the recording, marker label, window after it, text)
+    for s, lab, key, after, what in ((log['trip_s'], 'guard trip', 'guard trip', 'after the trip (muted)',
+                                      'The guard tripped'),
+                                     (log['off_s'], 'switch-off', 'timed switch-off', 'after the switch-off',
+                                      'The output was switched off')):
+        if s is not None:   # the firmware counts from the last (re)start; switch_analysis knows the restarts
+            t0 = sw.get('stop_times', {}).get(key, ta + s)
+            since = 'the ANC start' if abs(t0 - s - ta) < 1e-6 else f'the restart at {t0 - s - ta:+.2f} s'
+            stops.append((t0, lab, after, f'{what} {s:.1f} s after {since}'))
+    t_trip, stop_label, after_key, stop_text = min(stops) if stops else (None, None, None, None)
     stop = t_x - 2.0 if t_trip is None else min(t_x - 2.0, t_trip - 0.5)
     win = {'first 5 s': (ta + 0.5, min(ta + 5.5, stop)), 'steady (attached)': (ta + 10.0, stop)}
     if t_trip is None:
@@ -384,13 +613,31 @@ def measure(wav, f0=None):
     else:
         win[after_key] = (t_trip + 1.0, dur - 1.0)   # status prints are back: skip frozen stretches
     win = {k: v for k, v in win.items() if v[1] - v[0] >= 3.0}
+    excl = sw.get('exclude', [])   # output switched off (SW4, a restart's dip): not ANC on
     spec, nseg, res = {'ANC off': p_off}, {'ANC off': n_off}, {}
-    for k, (a, b) in win.items():
-        _, p, n = mean_psd(x, a, b, skip_frozen=(k == after_key))
+    for k, (a, b) in list(win.items()):
+        _, p, n = mean_psd(x, a, b, skip_frozen=(k == after_key), exclude=() if k == after_key else excl)
+        if n == 0:
+            del win[k]
+            continue
         spec[k], nseg[k] = p, n
         c = components(f, p, f0)
         res[k] = {q: 10 * np.log10(c_off[q] / max(c[q], 1e-30)) for q in COMPONENTS}
     on_key = next((k for k in ('steady (attached)', 'first 5 s') if k in win), None)
+    segs, contrast = [], None      # with pushbutton edges: levels of each on / off stretch, and on vs off pooled
+    if any(e['kind'] in SW_KINDS for e in sw.get('events', [])):
+        pool = {'on': [0.0, 0], 'off': [0.0, 0]}
+        for state, a, b in sw['segments']:
+            if b - a < 2.0:
+                continue
+            _, p, n = mean_psd(x, a, b)
+            if n:
+                c = components(f, p, f0)
+                segs.append((state, a, b, n, {q: 10 * np.log10(c_off[q] / max(c[q], 1e-30)) for q in COMPONENTS}))
+                pool[state] = [pool[state][0] + p * n, pool[state][1] + n]
+        if pool['on'][1] and pool['off'][1]:
+            c_on, c_of = (components(f, pool[s][0] / pool[s][1], f0) for s in ('on', 'off'))
+            contrast = {q: 10 * np.log10(c_of[q] / max(c_on[q], 1e-30)) for q in COMPONENTS}
     # time course: 2 s windows, 1 s hop; status prints freeze J17 L before the ANC start and after a trip
     tt, rows = [], []
     for a in np.arange(ta - 10.0, dur - 2.0, 1.0):
@@ -406,11 +653,11 @@ def measure(wav, f0=None):
     return dict(base=base, meta=meta, log=log, dur=dur, t_r=t_r, t_x=t_x, ta=ta, ta_how=ta_how, t_trip=t_trip,
                 stop_label=stop_label, stop_text=stop_text, f=f, f0=f0, f0_text=f0_text, c_off=c_off, win=win,
                 spec=spec, nseg=nseg, res=res, on_key=on_key, tt=np.array(tt),
-                rows={q: rows[:, i] for i, q in enumerate(COMPONENTS)})
+                rows={q: rows[:, i] for i, q in enumerate(COMPONENTS)}, sw=sw, segs=segs, contrast=contrast)
 
 
-def analyze(wav, f0=None):
-    m = measure(wav, f0)
+def analyze(wav, f0=None, buttons=None):
+    m = measure(wav, f0, buttons)
     base, meta, log, ta, t_r, c_off = m['base'], m['meta'], m['log'], m['ta'], m['t_r'], m['c_off']
     L = [f'{Path(wav).name}: {m["dur"]:.1f} s; runner start {t_r:.2f} s, exit {m["t_x"]:.2f} s',
          f'ANC start {ta:.2f} s (runner + {ta - t_r:.2f} s): {m["ta_how"]}', f'Notes: {meta.get("notes", "")}',
@@ -424,6 +671,7 @@ def analyze(wav, f0=None):
         L.append(f'  {m["stop_text"]} ({m["t_trip"]:.1f} s): ANC on ends 0.5 s before it.')
     L.append('  ANC off levels (dBFS on the US205; tones as amplitude): '
              + ', '.join(f'{q} {10 * np.log10((2 if "f0" in q else 1) * c_off[q] + 1e-30):.1f}' for q in COMPONENTS))
+    L += switch_lines(m)
     L.append('Log:')
     L += ['  ' + l for l in log['banner'][:7]]
     L += ['  ' + l for l in log['banner'][7:] if 'idle level' in l]   # pushbutton idle levels (ANC_BUTTONS)
@@ -444,6 +692,54 @@ def analyze(wav, f0=None):
     return m['res']
 
 
+def switch_lines(m):
+    """Text for analyze: the edges switch_analysis found, how fast the tones came down after each rise, and the levels
+    of the on / off stretches when the pushbuttons were used."""
+    sw, ta = m['sw'], m['ta']
+    if 'note' in sw:
+        return [f'Output switches: not analyzed, {sw["note"]}']
+    L = [f'Output switches and convergence (tone envelopes, {ENV_LP:.0f} Hz low-pass; times re the ANC start):',
+         '  tones ANC reduced 1-9 s after the start: '
+         + ', '.join(f'{n} {v:+.1f} dB' for n, v in zip(sw['names'], sw['st0']))
+         + f'; on when their mean is above {sw["thr_on"]:.1f} dB, off when each is within {SW_OFF_DB:.0f} dB of its '
+         'ANC-off level']
+    if sw['buttons']:
+        L.append('  ("output on" is SW4, or SW3 pressed while off: that press leaves no trace, so its time counts from '
+                 'the tones leaving the off level)')
+        if len(sw['names']) < 3:
+            L.append(f'  (only {len(sw["names"])} tone(s) followed: a short dip of the attenuation can pass for a '
+                     'restart; check the "restart (SW3)" lines against the presses)')
+    for ev in sw['events']:
+        s = f'  {ev["t"] - ta:+8.2f} s  {ev["kind"]}'
+        if 'off_s' in ev:
+            s += f', off {ev["off_s"]:.2f} s'
+        if 'fade_s' in ev:
+            s += f': fall {ev["fade_s"]:.3f} s' + ('' if ev['off_db'] is None
+                                                   else f', off level {ev["off_db"]:+.1f} dB re ANC off')
+        if ev.get('conv'):
+            parts = [f'{nm} -' if v is None or v[2] is None
+                     else f'{nm} {v[1]:.{0 if v[1] == CONV_DB else 1}f} dB in {v[2]:.2f} s'
+                     for nm, v in ev['conv'].items()]
+            s += ': ' + ', '.join(parts) + f' after {ev["ref"]}'
+        if ev['click'] is not None:
+            s += f'; edge transient {ev["click"]:+.1f} dB'
+        L.append(s)
+    if not sw['buttons']:
+        L.append('  (not a pushbutton test, so edges after the start were not looked for: run --buttons, analyze '
+                 '--buttons)')
+    if sw['ignored']:
+        L.append(f'  ({sw["ignored"]} dips of the attenuation that did not reach the ANC-off level were not counted)')
+    if m['segs']:
+        L.append('On / off stretches (without 1 s after a rise, 0.3 s after a fall and 0.2 s before an edge), '
+                 'off - on re ANC off before the start:')
+        L.append('  state  from-to (s re start)' + ''.join(f'{c:>11s}' for c in COMPONENTS))
+        for state, a, b, n, r in m['segs']:
+            L.append(f'  {state:5s}  {a - ta:7.1f}-{b - ta:7.1f}     ' + ''.join(f'{r[q]:+11.1f}' for q in COMPONENTS))
+        if m['contrast']:
+            L.append('  on vs off, pooled          ' + ''.join(f'{m["contrast"][q]:+11.1f}' for q in COMPONENTS))
+    return L
+
+
 def plot(base, m):
     import matplotlib
     matplotlib.use('Agg')
@@ -451,8 +747,12 @@ def plot(base, m):
     f, spec, f0, tt, t_exit = m['f'], m['spec'], m['f0'], m['tt'], m['t_x'] - m['ta']
     plt.rcParams.update({'font.size': 11, 'axes.edgecolor': '#999999', 'axes.labelcolor': INK, 'xtick.color': INK,
                          'ytick.color': INK, 'axes.titlelocation': 'left'})
-    fig = plt.figure(figsize=(13, 9.5))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.1])
+    sw = m['sw'] if m['sw'].get('events') else None
+    fig = plt.figure(figsize=(13, 13.5 if sw else 9.5))
+    gs = fig.add_gridspec(3 if sw else 2, 2, height_ratios=[1, 1, 1.1] if sw else [1, 1.1])
+    if sw:
+        plot_envelopes(fig.add_subplot(gs[1, :]), m)
+        plot_switches(base, m)
     ax = fig.add_subplot(gs[0, :])
     if len(tt):
         for q, c in C_COMP.items():
@@ -475,7 +775,7 @@ def plot(base, m):
     on_key = m['on_key'] or list(spec)[-1]
     for j, (lo, hi, logx, title) in enumerate(((100, 12000, True, 'Err spectrum'),
                                                (f0 - 30, f0 + 30, False, f'around f0 = {f0:.1f} Hz'))):
-        a2 = fig.add_subplot(gs[1, j])
+        a2 = fig.add_subplot(gs[2 if sw else 1, j])
         mm = (f >= lo) & (f <= hi)
         for k, c, lw in (('ANC off', C_OFF, 1.2), (on_key, C_ON, 1.0)):
             a2.plot(f[mm], 10 * np.log10(spec[k][mm] + 1e-30), color=c, lw=lw, label=f'{k}')
@@ -488,6 +788,76 @@ def plot(base, m):
         a2.legend(frameon=False, fontsize=9, loc='upper right')
     fig.tight_layout()
     fig.savefig(str(base) + '.png', dpi=90)
+    plt.close(fig)
+
+
+def plot_envelopes(ax, m):
+    """Attenuation of the tones switch_analysis follows, over the whole run, with the edges it found."""
+    import warnings
+    sw, ta = m['sw'], m['ta']
+    nb = sw['t'].size // 100          # 0.1 s medians: the on / off states; the envelope detail is in the zoom figure
+    t = sw['t'][:nb * 100].reshape(nb, 100).mean(axis=1) - ta
+
+    def med(v):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)   # all-NaN blocks (frozen J17 L) stay NaN
+            return np.nanmedian(v[:nb * 100].reshape(nb, 100), axis=1)
+    for j, nm in enumerate(sw['names']):
+        ax.plot(t, med(sw['A'][j]), color=C_TONE.get(nm, '#666666'), lw=1.0, label=nm)
+    if len(sw['names']) > 1:
+        ax.plot(t, med(sw['Am']), color=C_TONE['mean'], lw=1.4, label='mean')
+    ax.axhline(sw['thr_on'], color='#888888', lw=0.7, ls='--')
+    ax.axhline(SW_OFF_DB, color='#888888', lw=0.7, ls=':')
+    ax.axhline(0, color='#888888', lw=0.8)
+    for ev in sw['events']:
+        ax.axvline(ev['t'] - ta, color='#555555', lw=0.7, ls='--')
+        ax.text(ev['t'] - ta, 0.98, ' ' + ev['kind'], transform=ax.get_xaxis_transform(), rotation=90, va='top',
+                fontsize=8, color='#444444')
+    ax.set_xlim(-5, t[-1])
+    ax.set_ylim(-8, max(25.0, float(np.nanpercentile(sw['A'], 99.5)) + 3))
+    ax.set_xlabel(f'time from the ANC start (s); 0.1 s medians of the tone envelopes ({ENV_LP:.0f} Hz low-pass)')
+    ax.set_ylabel('attenuation re ANC off (dB)')
+    ax.set_title(f'Tones ANC reduced: output on above {sw["thr_on"]:.1f} dB (dashed), off below {SW_OFF_DB:.0f} dB '
+                 '(dotted); zoom in "... switches.png"')
+    ax.grid(True, lw=0.5, color=GRID)
+    ax.legend(frameon=False, ncol=5, loc='lower left', fontsize=9)
+
+
+def plot_switches(base, m):
+    """<base> switches.png: each edge switch_analysis found, -0.3 to +1.2 s around it, with the time each tone took
+    to come down (dots) after a rise."""
+    import matplotlib.pyplot as plt
+    sw, ta = m['sw'], m['ta']
+    evs = sw['events'][:12]
+    cols = min(len(evs), 4)
+    rows = (len(evs) + cols - 1) // cols
+    fig, axs = plt.subplots(rows, cols, figsize=(3.3 * cols + 0.7, 3.0 * rows + 0.5), squeeze=False, sharey=True)
+    t = sw['t']
+    for ax, ev in zip(axs.flat, evs):
+        t0 = ev['t_ref']
+        sel = (t >= t0 - 0.3) & (t <= t0 + 1.2)
+        for j, nm in enumerate(sw['names']):
+            ax.plot(t[sel] - t0, sw['A'][j][sel], color=C_TONE.get(nm, '#666666'), lw=1.2, label=nm)
+            v = (ev.get('conv') or {}).get(nm)
+            if v is not None and v[2] is not None:
+                ax.plot(v[2], v[1], 'o', ms=5, color=C_TONE.get(nm, '#666666'))
+        if len(sw['names']) > 1:
+            ax.plot(t[sel] - t0, sw['Am'][sel], color=C_TONE['mean'], lw=1.0, ls='--', label='mean')
+        ax.axvline(0, color='#555555', lw=0.8)
+        ax.axhline(0, color='#888888', lw=0.7)
+        ax.set_title(f'{ev["kind"]}, {ev["t"] - ta:+.2f} s' + ('' if ev['click'] is None
+                                                              else f'\nedge transient {ev["click"]:+.1f} dB'),
+                     fontsize=10)
+        ax.set_xlabel(f's re {ev["ref"]}', fontsize=9)
+        ax.grid(True, lw=0.5, color=GRID)
+    for ax in list(axs.flat)[len(evs):]:
+        ax.axis('off')
+    axs[0, 0].set_ylim(-8, max(25.0, float(np.nanpercentile(sw['A'], 99.5)) + 3))
+    for r in range(rows):
+        axs[r, 0].set_ylabel('attenuation re ANC off (dB)')
+    axs[0, 0].legend(frameon=False, fontsize=8, loc='lower right')
+    fig.tight_layout()
+    fig.savefig(str(base) + ' switches.png', dpi=90)
     plt.close(fig)
 
 
@@ -807,11 +1177,19 @@ def diag(wav, clamp=0.9):
 
 # ---------------------------------------------------------------- synthetic test
 
+SYNTH_SW = dict(off1=20.0, on1=28.0, r1=40.0, off2=55.0, r2=62.0, off3=70.0)   # synth's presses, s after the start
+
+
 def synth(path):
-    """Fan-like noise with f0 and 6 f0 tones; f0 drops 22 dB with a 0.4 s time constant at the ANC start. As on the
-    board, the seven wait-phase status prints (t = -13 ... -1 s) freeze the output for 0.4 s each, each 2 s after the
-    previous one ended, the last one ending 1 s before the ANC start. The analysis must find the start from them
-    (it is 1.3 s off the ANC_AFTER_RUNNER fallback) and leave them out of ANC off."""
+    """Fan-like noise with f0 and 6 f0 tones. At the ANC start f0 drops 22 dB with a 0.1 s time constant; 6 f0 stays.
+    As on the board, the seven wait-phase status prints (t = -13 ... -1 s) freeze the output for 0.4 s each, each 2 s
+    after the previous one ended, the last one ending 1 s before the ANC start. The analysis must find the start from
+    them (it is 1.3 s off the ANC_AFTER_RUNNER fallback) and leave them out of ANC off.
+    Then the output is switched as in a pushbutton test (SYNTH_SW):
+    - SW4 off, then on: 50 ms fades, W kept.
+    - SW3 while on: y cut at once, with a click; W = 0 during the 50 ms fade-in, then it converges as at the start.
+    - SW4 off, then SW3 while off.
+    - SW4 off for good."""
     from scipy.signal import butter, lfilter
     rng = np.random.default_rng(1)
     t_r, f0 = PRE_S, 602.37
@@ -821,8 +1199,22 @@ def synth(path):
     b, a_ = butter(2, [80, 8000], 'bandpass', fs=FS)
     x = lfilter(b, a_, rng.standard_normal(n)) * 10 ** (-58 / 20)
     t_anc = t_r + ANC_AFTER_RUNNER + 1.3
-    g = np.where(t < t_anc, 1.0, 10 ** (-22 / 20) + (1 - 10 ** (-22 / 20)) * np.exp(-(t - t_anc) / 0.4))
+    tau, fl, fade = 0.1, 10 ** (-22 / 20), 0.05
+    T = {k: t_anc + v for k, v in SYNTH_SW.items()}
+    ramp = lambda t0, up: np.clip((t - t0) / fade, 0, 1) if up else 1 - np.clip((t - t0) / fade, 0, 1)  # noqa: E731
+    sw = np.ones(n)                   # output switch gain (sw_gain)
+    for k0, k1, up in (('off1', 'on1', False), ('on1', 'r1', True), ('r1', 'off2', True), ('off2', 'r2', False),
+                       ('r2', 'off3', True), ('off3', None, False)):
+        mm = (t >= T[k0]) & (t < (T[k1] if k1 else np.inf))
+        sw[mm] = ramp(T[k0], up)[mm]
+    c = np.zeros(n)                   # converged part of W: from 0 at the start and after each restart's fade-in
+    for t0, t1 in ((t_anc, T['r1']), (T['r1'] + fade, T['r2']), (T['r2'] + fade, np.inf)):
+        mm = (t >= t0) & (t < t1)
+        c[mm] = 1 - np.exp(-(t[mm] - t0) / tau)
+    g = 1 - sw * c * (1 - fl)
     x += 10 ** (-60 / 20) * g * np.sin(2 * np.pi * f0 * t) + 10 ** (-57 / 20) * np.sin(2 * np.pi * 6 * f0 * t + 1)
+    i, m_ = int(T['r1'] * FS), int(0.003 * FS)      # the click of the cut
+    x[i:i + m_] += 1.2e-2 * rng.standard_normal(m_) * np.exp(-np.arange(m_) / (0.0004 * FS))
     waits = np.arange(-13.0, 0.0, 2.0)
     end = t_anc - 1.0
     for _ in waits:   # backwards from the last print; the held output decays through the US205 AC coupling
@@ -833,15 +1225,20 @@ def synth(path):
     wavfile.write(str(p), FS, x.astype(np.float32))
     base = Path(str(p)[:-4])
     Path(str(base) + '.json').write_text(json.dumps(dict(fs=FS, runner_start_s=t_r, runner_exit_s=t_x, runner_rc=0,
-                                                         notes='synthetic: f0 -22 dB, 6 f0 unchanged')),
+                                                         notes='synthetic: f0 -22 dB, 6 f0 unchanged; pushbutton '
+                                                               'sequence SYNTH_SW', buttons=True)),
                                          encoding='utf-8')
     status = ''.join(f'[ANC #{int(FS * (15 + w)) + 24}] wait t={w:+.1f} s  ref=-44.6 err=-66.0 dB  Px\'=1.00e-08  '
                      f'y_pk=0.000 clip=0/96000  W2=0.000e+00\n' for w in waits)
     Path(str(base) + '.log').write_text('[Step 0] SPORT4/DMA10-11 idle at boot\n>>> SYSTEM READY\n'
                                         '>>> Ref band 400-1500 Hz, mu 0.01, eps 1e-11, clamp 0.9\n' + status,
                                         encoding='utf-8')
-    print('wrote', p, f'(expect the ANC start at {t_anc:.2f} s from the print freezes, f0 about +21 dB, limited by '
+    print('wrote', p, f'(expect the ANC start at {t_anc:.2f} s from the print freezes, f0 about +20 dB, limited by '
           'the noise within +-6 Hz; 6 f0 and the bands 0 dB; total about +1 dB)')
+    print('  expected edges (s after the start): output off +20.0 and +55.0 and +70.0 (no transient); output on +28.0, '
+          'f0 10 dB about 0.02 s after the tones leave the off level; restart (SW3) +40.0 with a transient, f0 10 dB '
+          'about 0.20 s after the cut; output on +62.1 (SW3 while off), about 0.11 s after the tones leave the off '
+          'level; f0 10 dB about 0.15 s after the start')
 
 
 def main():
@@ -853,9 +1250,12 @@ def main():
     r.add_argument('--notes', default='', help='conditions: fan duty, band, who is in front of the outlet, ...')
     r.add_argument('--timeout', type=float, default=TIMEOUT_S, help='runner timeout, s (the board runs on after it)')
     r.add_argument('--cces', help='CrossCore Embedded Studio folder (default: CCES_ROOT)')
+    r.add_argument('--buttons', action='store_true', help='pushbutton test: look for SW4 / SW3 edges after the start')
     z = sub.add_parser('analyze')
     z.add_argument('wav')
     z.add_argument('--f0', type=float, help='fan f0 in Hz (default: the strongest peak in 560-640 Hz)')
+    z.add_argument('--buttons', action='store_true', default=None,
+                   help='look for SW4 / SW3 edges even if the .json does not say it was a pushbutton test')
     p = sub.add_parser('report', help='slide figures: bars, Err spectrum off/on, time course')
     p.add_argument('wav', nargs='+', help='1-3 runs, compared in this order')
     p.add_argument('--labels', nargs='+', help='one per wav (default: "ref band-pass <band>" from the log)')
@@ -874,7 +1274,7 @@ def main():
     elif a.cmd == 'run':
         run(a)
     elif a.cmd == 'analyze':
-        analyze(a.wav, a.f0)
+        analyze(a.wav, a.f0, a.buttons)
     elif a.cmd == 'report':
         report(a.wav, a.labels, a.f0, a.out, a.name, a.title)
     elif a.cmd == 'diag':
