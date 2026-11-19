@@ -74,7 +74,7 @@
 #define ANC_TRIP_FADE_MS        5u
 #define ANC_TRIP_QUIET_MS       10u      // 升頻濾波器拖尾約 1 ms、DMA 緩衝 4 個取樣，這個值留足餘裕
 
-// 喇叭輸出開關 (ANC_Set_Output；ANC_AUTO_OFF_S 也經過它):
+// 喇叭輸出開關 (ANC_Set_Output；按鍵與 ANC_AUTO_OFF_S 都經過它):
 //   - 關: y 在 ANC_SWITCH_FADE_MS 內線性淡出到 0，之後不再算 W 的卷積
 //   - 開: 用停住的 W 淡入，已收斂的音調馬上消掉，不必重新收斂
 //   - 只有完全打開時 W 才更新、發散保護才累計。關閉與淡入淡出期間 W 停住: 這時誤差麥聽不到 (或聽不完整) 輸出，
@@ -173,6 +173,8 @@ bool ANC_Get_Trip(ANC_Trip *t);         // 已判定發散且輸出已靜音時�
 bool ANC_Trip_Pending(void);            // 已判定、輸出還沒靜音 (淡出中): 這時不要 printf
 void ANC_Set_Output(bool on);           // 打開 / 關閉喇叭輸出 (main loop 呼叫；淡入淡出在中斷裡做)
 bool ANC_Output_Requested(void);        // 目前要求的開關狀態 (ANC_AUTO_OFF_S 關掉後是 false)
+bool ANC_Restart(void);                 // 重新開始: W 歸零、解除發散保護、輸出淡入、計時從 0 起算。中斷做完才回傳，
+                                        // 逾時 (中斷沒在跑) 回 false。main loop 呼叫
 ANC_State ANC_Get_State(void);
 bool ANC_Output_Quiet(void);            // 輸出已關、淡出完並維持 0 ANC_TRIP_QUIET_MS: 這時 printf 不會讓輸出卡住
 bool ANC_Get_Auto_Off(float *seconds);  // ANC_AUTO_OFF_S 已關掉輸出且已歸零時回傳 true，並填入關閉時 ANC 啟動後的秒數

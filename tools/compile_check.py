@@ -34,6 +34,7 @@ VARIANTS = {
     'band-400-5000': {'ANC_REF_BAND': 'ANC_REF_BAND_400_5000'},
     'auto-off': {'ANC_AUTO_OFF_S': '90u'},
     'auto-off-no-diag': {'ANC_AUTO_OFF_S': '90u', 'ANC_DIAG': '0'},
+    'buttons-off': {'ANC_BUTTONS': '0'},
     'prints-5': {'ANC_PRINTS_AFTER_START': '5'},
     'peak-meter': {'ENABLE_SLOT_PEAK_METER': '1'},
     'adc-capture': {'ENABLE_ADC_CAPTURE': '1'},

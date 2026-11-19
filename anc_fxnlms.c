@@ -88,6 +88,7 @@ static volatile float sw_gain  = 1.0f;          // 開關的淡入淡出增益 0
 static volatile uint32_t off_quiet = 0u;        // 完全關上後的取樣數 (數到 ANC_TRIP_QUIET_SAMPLES 為止)，切換時歸零
 static volatile float off_seconds  = 0.0f;      // 最近一次關閉時，ANC 啟動後的秒數
 static volatile bool  auto_off_done = false;    // ANC_AUTO_OFF_S 已經關過
+static volatile bool  restart_req   = false;    // ANC_Restart 的要求，中斷在下一個區塊開頭做完後清掉
 
 #if ANC_DIAG
 // 診斷紀錄 (anc_fxnlms.h 的 ANC_DIAG): ANC 運轉中在中斷裡記錄，判定發散時凍結。放 L2，L1 留給延遲線與係數
@@ -146,6 +147,47 @@ static void anc_trip(ANC_Trip_Reason reason)
     trip_reason  = reason;
 }
 
+/** @brief 重新開始 (中斷裡、區塊開頭): W 歸零，發散保護與開關回到剛啟動的狀態，輸出從 0 淡入。
+ *         延遲線、回授歷史與功率估計照常延續 (它們記錄的是實際的訊號)。trip_reason 最後清: main loop 看到時其他欄位已歸位 */
+static void anc_restart(void)
+{
+    int i;
+    for (i = 0; i < ANC_W_TAPS; i++)
+    {
+        w_coeffs[i] = 0.0f;
+    }
+    leak_acc      = 1.0f;
+    leak_count    = 0;
+    run_samples   = 0u;
+    clip_avg      = 0.0f;
+    zc_avg        = 0.0f;
+    zc_wt         = 0.0f;
+    y_hold        = 0.0f;
+    y_neg         = false;
+    out_gain      = 1.0f;
+    quiet_samples = 0u;
+    out_req       = true;
+    out_prev      = true;
+    sw_gain       = 0.0f;   // 從 0 淡入 (W = 0，y 本來就從 0 開始，淡入只是保險)
+    off_quiet     = 0u;
+    off_seconds   = 0.0f;
+    auto_off_done = false;
+#if ANC_DIAG
+    diag_snap_idx = 0u;
+    diag_snap_n   = 0u;
+    diag_hist_n   = 0u;
+    dg_n    = 0u;
+    dg_clip = 0u;
+    dg_ypk  = 0.0f;
+    dg_x    = 0.0f;
+    dg_fy   = 0.0f;
+    dg_u    = 0.0f;
+    dg_y    = 0.0f;
+    dg_e    = 0.0f;
+#endif
+    trip_reason   = ANC_TRIP_NONE;
+}
+
 // 初始化函式
 void ANC_Init(void)
 {
@@ -201,6 +243,7 @@ void ANC_Init(void)
     off_quiet    = 0u;
     off_seconds  = 0.0f;
     auto_off_done = false;
+    restart_req  = false;
 #if ANC_DIAG
     diag_snap_idx = 0u;
     diag_snap_n   = 0u;
@@ -285,6 +328,12 @@ void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count)
     int i, k;
     uint32_t n_core = 0u, n_clip = 0u;
     float ref_sum = 0.0f, err_sum = 0.0f, y_peak = 0.0f;
+
+    if (restart_req)   // ANC_Restart (main loop): 在區塊開頭做，同一個區塊內狀態一致
+    {
+        anc_restart();
+        restart_req = false;
+    }
 
     for (i = 0; i < count; i += 4 * ANC_DECIM)
     {
@@ -560,6 +609,17 @@ void ANC_Set_Output(bool on)
 bool ANC_Output_Requested(void)
 {
     return out_req;
+}
+
+/** @brief 要求中斷重新開始，等它做完 (下一個區塊開頭，約 21 us)。約 0.1 s 內沒做完 (中斷沒在跑) 就回 false */
+bool ANC_Restart(void)
+{
+    uint32_t n;
+    restart_req = true;
+    for (n = 0u; restart_req && (n < 20000000u); n++)
+    {
+    }
+    return !restart_req;
 }
 
 ANC_State ANC_Get_State(void)

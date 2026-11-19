@@ -165,6 +165,34 @@ to the terms of the associated Analog Devices License Agreement.
 /* ANC_DIAG (anc_fxnlms.h): after a divergence trip, Diag_Report prints the status history and writes the snapshot */
 #define ANC_DIAG_REPORT         (ANC_DIAG && (APP_MODE == APP_MODE_ANC))
 
+/* Carrier pushbuttons and LEDs (EV-SOMCRR-EZKIT), ANC mode. No printf on a press, since ANC is running.
+ *   - SW4 (silkscreen PB2): speaker output off / on (ANC_Set_Output: 50 ms fade; W frozen while off, so the converged
+ *     W cancels again at once). Ignored after a divergence trip.
+ *   - SW3 (PB1): restart ANC (ANC_Restart: W = 0, guard re-armed, output fades in), also after a trip.
+ *   - LED9 (LED1_KIT): output on, blinking during the ANC_START_DELAY_S wait. LED10 (LED2_KIT): divergence trip.
+ *     LED7 (LED3_KIT): blinks while the main loop runs.
+ * Wiring (carrier schematic p. 10 and 17, SOM schematic p. 12; checked 2026-11-18): SW3 -> RC + 74LVC14A inverter ->
+ * bus switch U19 -> PUSHBUTTON_1 -> SoM interface B (J3) pin 50 "GPIO1" -> PD_00. SW4 -> U20 -> PUSHBUTTON_2 -> pin 52
+ * "GPIO2" -> PH_00. (The carrier manual says SW4 = GPIO1; the schematic has SW3.) LED1/2/3_KIT -> pins 88/90/92
+ * (LINKPORT1_D4/D3/D2) -> PC_03/PC_02/PC_01, active high (manual Table 3-7). The carrier schematic numbers J3 from its
+ * own side (49, 51, 87, ...): the self-mating connector turns odd into even. None of these pins has another user on
+ * the SOM or the carrier; the project pinmux only takes PA_14/PA_15. The bus switches are on: SoftConfig U6 port A
+ * bit 1, ~PUSHBUTTON_EN = 0.
+ * The pressed level is not certain from the schematic (pull direction around the inverter), so Buttons_Init takes the
+ * level at start-up as idle and prints it; pressed = the other level. Do not hold a button during the start. */
+#define ANC_BUTTONS             1
+#define ANC_BUTTONS_ON          (ANC_BUTTONS && ANC_STATUS_ON)   /* polled in the status loop of main() */
+#define BTN_OUTPUT_PORT         H      /* SW4 (PB2): PH_00 */
+#define BTN_OUTPUT_PIN          0
+#define BTN_RESTART_PORT        D      /* SW3 (PB1): PD_00 */
+#define BTN_RESTART_PIN         0
+#define LED_OUTPUT_PORT         C      /* LED9, LED1_KIT: PC_03 */
+#define LED_OUTPUT_PIN          3
+#define LED_TRIP_PORT           C      /* LED10, LED2_KIT: PC_02 */
+#define LED_TRIP_PIN            2
+#define LED_ALIVE_PORT          C      /* LED7, LED3_KIT: PC_01 */
+#define LED_ALIVE_PIN           1
+
 /* DMA timing probe (diagnostic, any APP_MODE). Records the TX (SPORT 4A = DMA10) and RX (SPORT 4B = DMA11) DMA positions:
  *   - start-up trace, logged on every change: from the TX DMA submit (SPORTs still off) until the first RX blocks are in.
  *     Shows how many words the TX DMA prefetches and when each SPORT starts.
@@ -456,6 +484,118 @@ static void Diag_Report(void)
 	free(iobuf);   /* only after fclose: the stream used it */
 	printf("[DIAG] snapshot written\n");
 	fflush(stdout);
+}
+#endif
+
+#if ANC_BUTTONS_ON
+/* Pushbuttons and LEDs (ANC_BUTTONS): GPIO registers written directly, only the bits of our pins (SET/CLR registers) */
+#define PORT_REG_(p, r)         pREG_PORT##p##_##r
+#define PORT_REG(p, r)          PORT_REG_(p, r)
+#define BTN_POLL_CALLBACKS      (CALLBACKS_PER_S / 100u)   /* poll every 10 ms */
+#define BTN_STABLE_POLLS        3u                         /* a new level must hold 30 ms (debounce) */
+#define LED_BLINK_POLLS         25u                        /* 250 ms on, 250 ms off */
+#define LED_SET(P, n, on)       do { if (on) { *PORT_REG(P, DATA_SET) = 1u << (n); } \
+                                     else    { *PORT_REG(P, DATA_CLR) = 1u << (n); } } while (0)
+#define LED_SETUP(P, n)         do { *PORT_REG(P, FER_CLR) = 1u << (n); *PORT_REG(P, DATA_CLR) = 1u << (n); \
+                                     *PORT_REG(P, DIR_SET) = 1u << (n); } while (0)
+
+typedef struct
+{
+	volatile uint32_t *data;   /* PORTx_DATA */
+	uint32_t bit;
+	uint32_t pressed;          /* level while pressed: the opposite of the level at start-up */
+	uint32_t stable;           /* debounced level */
+	uint32_t count;            /* polls the other level has held */
+} Button;
+
+static Button g_BtnOutput, g_BtnRestart;
+static uint32_t g_BtnPolls;
+
+static void Button_Setup(Button *b, volatile uint32_t *fer_clr, volatile uint32_t *dir_clr, volatile uint32_t *inen_set,
+						 volatile uint32_t *data, uint32_t pin)
+{
+	b->bit = 1u << pin;
+	*fer_clr  = b->bit;   /* GPIO, not a peripheral function */
+	*dir_clr  = b->bit;   /* input */
+	*inen_set = b->bit;   /* input buffer on */
+	b->data    = data;
+	b->count   = 0u;
+}
+
+/* Idle level, read once the input buffers have settled: a press is the other level */
+static void Button_Idle(Button *b)
+{
+	b->stable  = ((*b->data & b->bit) != 0u) ? 1u : 0u;
+	b->pressed = 1u - b->stable;
+}
+
+/* 1 on the debounced change to the pressed level */
+static int Button_Pressed(Button *b)
+{
+	uint32_t level = ((*b->data & b->bit) != 0u) ? 1u : 0u;
+	if (level == b->stable)
+	{
+		b->count = 0u;
+		return 0;
+	}
+	if (++b->count < BTN_STABLE_POLLS)
+	{
+		return 0;
+	}
+	b->stable = level;
+	b->count  = 0u;
+	return level == b->pressed;
+}
+
+static void Buttons_Init(void)
+{
+	Button_Setup(&g_BtnOutput, PORT_REG(BTN_OUTPUT_PORT, FER_CLR), PORT_REG(BTN_OUTPUT_PORT, DIR_CLR),
+				 PORT_REG(BTN_OUTPUT_PORT, INEN_SET), PORT_REG(BTN_OUTPUT_PORT, DATA), BTN_OUTPUT_PIN);
+	Button_Setup(&g_BtnRestart, PORT_REG(BTN_RESTART_PORT, FER_CLR), PORT_REG(BTN_RESTART_PORT, DIR_CLR),
+				 PORT_REG(BTN_RESTART_PORT, INEN_SET), PORT_REG(BTN_RESTART_PORT, DATA), BTN_RESTART_PIN);
+	LED_SETUP(LED_OUTPUT_PORT, LED_OUTPUT_PIN);
+	LED_SETUP(LED_TRIP_PORT, LED_TRIP_PIN);
+	LED_SETUP(LED_ALIVE_PORT, LED_ALIVE_PIN);
+	{
+		volatile uint32_t settle;
+		uint32_t i;
+		for (i = 0u; i < 200u; i++)   /* a few us of register reads: the input synchronizers settle */
+		{
+			settle = *g_BtnOutput.data;
+		}
+		(void)settle;
+	}
+	Button_Idle(&g_BtnOutput);
+	Button_Idle(&g_BtnRestart);
+	g_BtnPolls = 0u;
+	/* Still in the ANC_START_DELAY_S wait (y = 0), so this print is silent */
+	printf(">>> Buttons idle level: SW4 (PH_00) = %u, SW3 (PD_00) = %u; a press is the other level\n",
+		   g_BtnOutput.stable, g_BtnRestart.stable);
+	fflush(stdout);
+}
+
+/* Every BTN_POLL_CALLBACKS from the status loop: act on presses, update the LEDs. Returns 1 after a restart, so the
+ * caller can let the trip and switch-off logs come again. */
+static int Buttons_Poll(void)
+{
+	int restarted = 0;
+	ANC_State st;
+
+	if (Button_Pressed(&g_BtnRestart))
+	{
+		restarted = ANC_Restart() ? 1 : 0;
+	}
+	else if (Button_Pressed(&g_BtnOutput) && (ANC_Get_State() != ANC_STATE_TRIPPED))
+	{
+		ANC_Set_Output(!ANC_Output_Requested());
+	}
+	g_BtnPolls++;
+	st = ANC_Get_State();
+	LED_SET(LED_OUTPUT_PORT, LED_OUTPUT_PIN,
+			(st == ANC_STATE_ON) || ((st == ANC_STATE_WAIT) && (((g_BtnPolls / LED_BLINK_POLLS) & 1u) != 0u)));
+	LED_SET(LED_TRIP_PORT, LED_TRIP_PIN, st == ANC_STATE_TRIPPED);
+	LED_SET(LED_ALIVE_PORT, LED_ALIVE_PIN, ((g_BtnPolls / LED_BLINK_POLLS) & 1u) != 0u);
+	return restarted;
 }
 #endif
 
@@ -1516,6 +1656,10 @@ int main(int argc, char *argv[])
 		printf(">>> Output switched off %u s after the ANC start (ANC_AUTO_OFF_S), W frozen; it stays off\n",
 			   ANC_AUTO_OFF_S);
 #endif
+#if ANC_BUTTONS_ON
+		printf(">>> Buttons: SW4 = speaker output off/on (W kept), SW3 = restart ANC (W = 0); "
+			   "LED9 = output on, LED10 = divergence trip, LED7 = alive\n");
+#endif
 #if ANC_DIAG_REPORT
 		printf(">>> Diagnostics: after a trip or the timed switch-off, status every %u ms and the last %u samples (%s)\n",
 			   ANC_DIAG_TICK_MS, ANC_DIAG_SNAP, ANC_DIAG_FILE);
@@ -1645,8 +1789,24 @@ int main(int argc, char *argv[])
 		cycle_t lastStamp;
 		START_CYCLE_COUNT(lastStamp);
 #endif
+#if ANC_BUTTONS_ON
+		uint32_t btnCount = TestCallbackCount;
+		Buttons_Init();
+#endif
 		while(1)
 		{
+#if ANC_BUTTONS_ON
+			if ((uint32_t)(TestCallbackCount - btnCount) >= BTN_POLL_CALLBACKS)
+			{
+				btnCount = TestCallbackCount;
+				if (Buttons_Poll())   /* SW3 restarted ANC: a new trip or switch-off is logged again, prints stop */
+				{
+					tripPrinted = 0;
+					offPrinted  = 0;
+					runPrints   = 0;
+				}
+			}
+#endif
 #if (APP_MODE == APP_MODE_ANC)
 			/* Divergence guard (ANC_TRIP_*, anc_fxnlms.h): ANC_Get_Trip waits until the ISR has muted the speaker;
 			 * log when and why */
