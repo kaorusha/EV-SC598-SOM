@@ -6,6 +6,9 @@
 [Bb]uild/
 bin/
 obj/
+# Output of the PathMeasure build configuration (Release + APP_MODE=APP_MODE_PATH_MEASURE, for tools/pathmeas.py);
+# CCES puts its own .gitignore in it
+PathMeasure/
 
 # CCES compiled executables, loader files and object files
 *.dxe

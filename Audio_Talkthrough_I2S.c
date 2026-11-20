@@ -51,7 +51,9 @@ to the terms of the associated Analog Devices License Agreement.
 #define APP_MODE_DIAG_DAC_ID    4
 #define APP_MODE_SPEAKER_TEST   5
 
+#ifndef APP_MODE   /* a CCES build configuration can set it, e.g. APP_MODE=APP_MODE_PATH_MEASURE for the demo script */
 #define APP_MODE                APP_MODE_ANC  /* Select application mode here */
+#endif
 
 /*
  * Gain staging (measured, Windows volume 100%): REW -12 dBFS -> J16 slot peak -6 dBFS (tracks 1:1).
