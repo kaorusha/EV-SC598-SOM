@@ -965,6 +965,64 @@ def floor_lines(lab, m):
             f'{dmin:+.1f} dB at {fmin:.0f} Hz']
 
 
+THIRD_OCT = (500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000)   # nominal 1/3-octave centres (Hz)
+
+
+def a_weight(f):
+    """A-weighting (IEC 61672) as power gains at f Hz."""
+    fa = np.maximum(f, 1.0)
+    ra = (12194 ** 2 * fa ** 4) / ((fa ** 2 + 20.6 ** 2) * np.sqrt((fa ** 2 + 107.7 ** 2) * (fa ** 2 + 737.9 ** 2))
+                                  * (fa ** 2 + 12194 ** 2))
+    return (ra * 10 ** (2.0 / 20)) ** 2
+
+
+def critical_band(fc):
+    """Critical bandwidth (Hz) around fc (Zwicker's formula, as ECMA-74 uses for the tone-to-noise ratio)."""
+    return 25 + 75 * (1 + 1.4 * (fc / 1000) ** 2) ** 0.69
+
+
+def prominence_limit(fc):
+    """ECMA-74: a tone is prominent when its tone-to-noise ratio reaches this many dB."""
+    return 8.0 + 8.33 * np.log10(1000 / fc) if fc < 1000 else 8.0
+
+
+def tone_to_noise(f, p, fc, f0):
+    """Tone-to-noise ratio (dB) of the tone at fc, ECMA-74 style: the tone's power (within TONE_HW) over the noise in
+    the critical band around it (the band's mean PSD without the fan tones, times the bandwidth)."""
+    cb = critical_band(fc)
+    far = np.abs(f - np.round(f / f0) * f0) > TONE_HW
+    noise = float(np.mean(p[(f >= fc - cb / 2) & (f < fc + cb / 2) & far])) * cb
+    tone = float(np.sum(p[np.abs(f - fc) <= TONE_HW + 1e-9])) * (f[1] - f[0])
+    return 10 * np.log10(tone / noise)
+
+
+def perceived_lines(lab, m, names):
+    """report text: what the ear goes by rather than the total. ANC only takes the tones out, and those are a small
+    part of the fan's power (37% for f0 + 5 f0 + 6 f0 on 2026-11-19), so the total barely moves; but a tone that
+    stands out of the noise in its critical band is what one hears, so the tone-to-noise ratio tells more."""
+    f, p_off, p_on, f0 = m['f'], m['spec']['ANC off'], m['spec'][m['on_key']], m['f0']
+    df = f[1] - f[0]
+    band = lambda p, lo, hi: float(np.sum(p[(f >= lo) & (f < hi)]) * df)   # noqa: E731
+    wa = a_weight(f)
+    a_db = 10 * np.log10(band(p_off * wa, 20, 20000) / band(p_on * wa, 20, 20000))
+    ks = (1, 5, 6)
+    share = sum(band(p_off, k * f0 - TONE_HW, k * f0 + TONE_HW + 1e-9) for k in ks) / band(p_off, 60, 20000)
+    oct3 = []
+    for j in sorted({int(round(3 * np.log2(k * f0 / 1000))) for k in ks}):   # base-2 bands, so each holds its tone
+        c = 1000 * 2 ** (j / 3)
+        lo, hi = c * 2 ** (-1 / 6), c * 2 ** (1 / 6)
+        nom = min(THIRD_OCT, key=lambda v: abs(np.log2(v / c)))
+        oct3.append(f'{nom / 1000:g} kHz' if nom >= 1000 else f'{nom} Hz')
+        oct3[-1] += f' {10 * np.log10(band(p_off, lo, hi) / band(p_on, lo, hi)):+.1f}'
+    tnr = [f'{names[q].split(" (")[0]} {tone_to_noise(f, p_off, k * f0, f0):+.1f} -> '
+           f'{tone_to_noise(f, p_on, k * f0, f0):+.1f} dB (limit {prominence_limit(k * f0):.1f})'
+           for k, q in zip(ks, ('f0', '5 f0', '6 f0'))]
+    return [f'  {lab}: A-weighted total {a_db:+.1f} dB(A); f0, 5 f0 and 6 f0 are {100 * share:.0f}% of the ANC-off '
+            f'power (taking them out completely lowers the total by {-10 * np.log10(1 - share):.1f} dB)',
+            f'    1/3-octave bands of the tones: ' + ', '.join(oct3) + ' dB',
+            '    tone-to-noise ratio, ANC off -> on: ' + ', '.join(tnr)]
+
+
 def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
     """Slide figures for 1-3 runs: <name>_bars.png (attenuation per component), <name>_spectrum.png (Err spectrum,
     ANC off and on, with off - on per 1/24 octave), <name>_time.png (attenuation over time) and <name>.txt."""
@@ -1003,6 +1061,10 @@ def report(wavs, labels=None, f0s=None, out=None, name='anc_lab', title=None):
     L.append(f'Err floor between the fan tones (bins within +-{TONE_HW:.0f} Hz of every k f0 left out), off - on (dB):')
     for lab, m in zip(labels, runs):
         L += floor_lines(lab, m)
+    L.append('What the ear goes by, off - on (dB): A-weighted total, the 1/3-octave bands of the tones, and the '
+             'tone-to-noise ratio in the critical band (ECMA-74 style; a tone is prominent at or above the limit):')
+    for lab, m in zip(labels, runs):
+        L += perceived_lines(lab, m, names)
     L.append(f'Spectrum figure: 0.5 s Hann segments (2 Hz); off - on over 1/{SMOOTH_OCT}-octave bands. '
              'Figures: ' + ', '.join(f'{name}_{k}.png' for k in ('bars', 'spectrum', 'time')))
     txt = '\n'.join(L)
