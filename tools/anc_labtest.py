@@ -142,10 +142,11 @@ def cces_paths(arg):
     return runner, preload
 
 
-def runner_cmd(runner, preload, timeout_s):
+def runner_cmd(runner, preload, timeout_s, dxe=DXE):
+    """CCES_runner loads dxe (default the Release build) on SHARC core 1 and runs it; the board runs on after it."""
     return [str(runner), '--target', 'Emulation Debug Target', '--platform', 'ADSP-SC598W USB EZ-KIT via Debug Agent',
             '--processor', 'ADSP-SC598W', '-v1', '--reset-on-connect', '--timeout', str(int(timeout_s * 1000)),
-            '-c', f'0,CLEAR_SYMBOLS|RUN_AFTER_LOAD|{preload},{DXE}']
+            '-c', f'0,CLEAR_SYMBOLS|RUN_AFTER_LOAD|{preload},{dxe}']
 
 
 def build_state():
