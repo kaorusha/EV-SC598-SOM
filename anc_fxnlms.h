@@ -192,6 +192,8 @@ typedef struct
 
 // 對外 API 函式宣告
 void ANC_Init(void);
+void ANC_Set_Paths(const float *s_hat, const float *f_hat);   // 換掉編進來的 Ŝ / F̂ (自然順序，各 2048 taps；NULL = 不換)。
+                                                              // ANC_Init 之後、SPORT 開始之前呼叫
 void ANC_Process_Block(const int *pRxBuf, int *pTxBuf, int count);  // count 須為 4 * ANC_DECIM 的倍數
 bool ANC_Is_Running(void);              // ANC_START_DELAY_S 過了沒
 void ANC_Get_Status(ANC_Status *st);    // 讀出並清除這段期間的統計 (main loop 呼叫，非中斷)

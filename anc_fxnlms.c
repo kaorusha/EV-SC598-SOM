@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stddef.h>
 #include "anc_fxnlms.h"
 #include "anc_ref_band.h"
 
@@ -278,6 +279,27 @@ void ANC_Init(void)
     dg_y    = 0.0f;
     dg_e    = 0.0f;
 #endif
+}
+
+/** @brief 換掉編進來的 Ŝ / F̂ (例如現場量的，Audio_Talkthrough_I2S.c 開機時從電腦讀)。NULL 保留原本的。
+ *         只在 SPORT 開始之前呼叫: 中斷正在用這兩組係數 */
+void ANC_Set_Paths(const float *s_hat, const float *f_hat)
+{
+    int i;
+    if (s_hat != NULL)
+    {
+        for (i = 0; i < ANC_S_TAPS; i++)
+        {
+            s_hat_rev[i] = s_hat[ANC_S_TAPS - 1 - i];
+        }
+    }
+    if (f_hat != NULL)
+    {
+        for (i = 0; i < ANC_F_TAPS; i++)
+        {
+            f_hat_rev[i] = f_hat[ANC_F_TAPS - 1 - i];
+        }
+    }
 }
 
 /**

@@ -30,6 +30,7 @@ VARIANTS = {
     'as-is': {},
     'anc-diag-off': {'ANC_DIAG': '0'},
     'rescale-off': {'ANC_RESCALE': '0'},
+    'paths-from-host-off': {'ANC_PATHS_FROM_HOST': '0'},
     'band-none': {'ANC_REF_BAND': 'ANC_REF_BAND_NONE'},
     'band-400-1500': {'ANC_REF_BAND': 'ANC_REF_BAND_400_1500'},
     'band-400-5000': {'ANC_REF_BAND': 'ANC_REF_BAND_400_5000'},

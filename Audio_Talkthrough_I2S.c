@@ -184,6 +184,18 @@ to the terms of the associated Analog Devices License Agreement.
  * level at start-up as idle and prints it; pressed = the other level. Do not hold a button during the start. */
 #define ANC_BUTTONS             1
 #define ANC_BUTTONS_ON          (ANC_BUTTONS && ANC_STATUS_ON)   /* polled in the status loop of main() */
+
+/* S-hat / F-hat measured on site (2026-11-19, for the demo script). At start-up, before the SPORTs run, ANC mode reads
+ * ANC_PATH_FILE_S / _F from the host PC over JTAG (Host_Path) and uses them instead of the compiled-in second_path.h /
+ * feedback_path.h; tools/export_paths.py --runtime writes them (measurements/ is gitignored, the headers stay the
+ * committed defaults). No file, or a file that fails the checks: the compiled-in one is used. The banner says which.
+ * File: 128-byte header (bytes "ANCP", then little-endian uint32 version 1, path 0 = S / 1 = F, fs, taps, and 108
+ * bytes of ASCII note), then taps little-endian float32 in natural order (tap k = response k core samples later).
+ * Set 0 for a build that boots without the debugger (flash): fopen goes to the JTAG host. */
+#define ANC_PATHS_FROM_HOST     1
+#define ANC_PATHS_FROM_HOST_ON  (ANC_PATHS_FROM_HOST && (APP_MODE == APP_MODE_ANC))
+#define ANC_PATH_FILE_S         "measurements/anc_paths/second_path.bin"
+#define ANC_PATH_FILE_F         "measurements/anc_paths/feedback_path.bin"
 #define BTN_OUTPUT_PORT         H      /* SW4 (PB2): PH_00 */
 #define BTN_OUTPUT_PIN          0
 #define BTN_RESTART_PORT        D      /* SW3 (PB1): PD_00 */
@@ -388,8 +400,8 @@ static void Update_Adc_Capture(const int *pIn)
 }
 #endif
 
-#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE || ANC_DIAG_REPORT
-/* Host PC path of a repo-relative file written over JTAG: this source file's folder + rel. CCES compiles linked
+#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE || ANC_DIAG_REPORT || ANC_PATHS_FROM_HOST_ON
+/* Host PC path of a repo-relative file read or written over JTAG: this source file's folder + rel. CCES compiles linked
  * sources by absolute path, so __FILE__ holds the repo folder of whichever PC built it. */
 static const char *Host_Path(const char *rel)
 {
@@ -402,6 +414,59 @@ static const char *Host_Path(const char *rel)
 	}
 	snprintf(path, sizeof(path), "%.*s%s", (int)n, src, rel);
 	return path;
+}
+#endif
+
+#if ANC_PATHS_FROM_HOST_ON
+/* S-hat / F-hat read from the host at start-up (ANC_PATHS_FROM_HOST), in L2 like the ANC_DIAG buffers */
+#pragma section("seg_l2_bsz_data", ZERO_INIT)
+static float g_PathS[ANC_S_TAPS];
+#pragma section("seg_l2_bsz_data", ZERO_INIT)
+static float g_PathF[ANC_F_TAPS];
+static int   g_PathLoadedS, g_PathLoadedF;          /* 1 = from the host file, 0 = compiled-in */
+static char  g_PathNoteS[112], g_PathNoteF[112];    /* the file's note, for the banner */
+
+static uint32_t Le32(const unsigned char *b)
+{
+	return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+/* One path file (format at ANC_PATHS_FROM_HOST) into dst; 1 if it was there and passed the checks */
+static int Load_Path_File(const char *rel, uint32_t which, float *dst, uint32_t taps, char *note)
+{
+	unsigned char head[128];
+	FILE *fp = fopen(Host_Path(rel), "rb");
+	uint32_t k;
+	int ok;
+	note[0] = '\0';
+	if (fp == NULL)
+	{
+		return 0;   /* no file: the compiled-in path */
+	}
+	ok = (fread(head, 1u, sizeof(head), fp) == sizeof(head)) && (memcmp(head, "ANCP", 4u) == 0)
+		 && (Le32(&head[4]) == 1u) && (Le32(&head[8]) == which) && (Le32(&head[12]) == ANC_CORE_FS)
+		 && (Le32(&head[16]) == taps) && (fread(dst, sizeof(float), taps, fp) == taps);
+	fclose(fp);
+	for (k = 0u; ok && (k < taps); k++)
+	{
+		ok = (dst[k] == dst[k]) && (fabsf(dst[k]) < 1.0f);   /* no NaN, far below any real path tap */
+	}
+	if (!ok)
+	{
+		printf("[PATH] %s failed the checks; the compiled-in one is used\n", rel);
+		return 0;
+	}
+	memcpy(note, &head[20], 108u);
+	note[108] = '\0';
+	return 1;
+}
+
+/* Before the SPORTs start: the ISR uses S-hat / F-hat from the first block on */
+static void Load_Paths(void)
+{
+	g_PathLoadedS = Load_Path_File(ANC_PATH_FILE_S, 0u, g_PathS, ANC_S_TAPS, g_PathNoteS);
+	g_PathLoadedF = Load_Path_File(ANC_PATH_FILE_F, 1u, g_PathF, ANC_F_TAPS, g_PathNoteF);
+	ANC_Set_Paths(g_PathLoadedS ? g_PathS : NULL, g_PathLoadedF ? g_PathF : NULL);
 }
 #endif
 
@@ -1617,6 +1682,9 @@ int main(int argc, char *argv[])
 #if (APP_MODE == APP_MODE_ANC)
 	/* ANC Algorithm Initialization */
 	ANC_Init();
+#if ANC_PATHS_FROM_HOST_ON
+	Load_Paths();   /* on-site S-hat / F-hat if tools/export_paths.py --runtime wrote them */
+#endif
 	printf("[Step 7] ANC Algorithm Initialized\n");
 	fflush(stdout);
 #elif (APP_MODE == APP_MODE_DIAG_DAC_ID)
@@ -1649,6 +1717,12 @@ int main(int argc, char *argv[])
 		printf(">>> MODE: ANC (FxNLMS, 48 kHz core, codec 192 kHz)\n");
 		printf(">>> Ref band %s, mu %g, eps %g, clamp %g; ANC starts %u s after boot\n",
 			   ANC_REF_BAND_NAME, ANC_MU, ANC_EPSILON, ANC_SAFE_OUTPUT_LIMIT, ANC_START_DELAY_S);
+#if ANC_PATHS_FROM_HOST_ON
+		printf(">>> S-hat: %s%s%s\n", g_PathLoadedS ? ANC_PATH_FILE_S : "compiled-in second_path.h",
+			   g_PathLoadedS ? ": " : "", g_PathNoteS);
+		printf(">>> F-hat: %s%s%s\n", g_PathLoadedF ? ANC_PATH_FILE_F : "compiled-in feedback_path.h",
+			   g_PathLoadedF ? ": " : "", g_PathNoteF);
+#endif
 #if ANC_RESCALE
 		printf(">>> Output limit %g kept by scaling W down (anti-windup: no clipping, W does not grow past it)\n",
 			   ANC_SAFE_OUTPUT_LIMIT);
