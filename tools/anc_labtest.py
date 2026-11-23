@@ -19,6 +19,10 @@ that load and switch it on before ANC starts (ANC_START_DELAY_S after boot). A r
   python tools/anc_labtest.py track <wav> [--step S]     second by second: fan f0 and tones, frozen J17 L (dumps)
   python tools/anc_labtest.py pickup <wav> [--f0 HZ]     fan lines inside vs outside the wait-phase print freezes:
                                                          through the core (ADC side) or after the DAC
+  python tools/anc_labtest.py listen --name "..." [--seconds 10] [--f0 HZ] [--notes "..."] [--windows a-b,c-d]
+                                     [--course]          record J17 L without loading anything: the fan lines now,
+                                                         per stretch (e.g. output off, then on) and second by second
+  python tools/anc_labtest.py listen --wav <wav> [--windows a-b,c-d] [--course]   the same for an earlier recording
   python tools/anc_labtest.py synth <wav>                synthetic recording to test the analysis
 
 The CrossCore Embedded Studio folder (CCES_runner.exe, SHARC/ldr/ezkitSC598W_preload_core1.dxe) comes from --cces or
@@ -992,6 +996,101 @@ def pickup(wav, f0=None):
     Path(str(base) + ' pickup.txt').write_text(txt + '\n', encoding='utf-8')
 
 
+def listen(a):
+    """Record J17 L for a.seconds without loading anything (the board keeps running whatever it runs) and print the
+    fan lines, for quick A/B checks of the setup, e.g. which cable or supply brings in the 2 f0 pickup (2026-11-23).
+    Saves "<name>".wav/.json/.txt in measurements/anc_test/. --wav analyzes an earlier recording again (its .txt is
+    rewritten). --windows "a-b,c-d,..." gives each line per stretch of the recording and its change against the first
+    stretch, e.g. output off, then on after an SW3 press; --course prints the lines second by second to find the press."""
+    if a.wav:
+        base = Path(str(a.wav)[:-4])
+        fs, x = wavfile.read(str(a.wav))
+        assert fs == FS, fs
+        meta = json.loads(Path(str(base) + '.json').read_text(encoding='utf-8'))
+        started, notes = meta.get('started', '?'), meta.get('notes', '')
+    else:
+        if not a.name:
+            sys.exit('Give --name for a new recording, or --wav for an earlier one.')
+        sd = pm.import_sounddevice()
+        dev_in, _ = pm.wasapi_devices(sd, pm.DEVICE)
+        vol = pm.windows_volume(dev_in['name'], capture=True)
+        if 'scalar' in vol and abs(vol['scalar'] - 0.5) > 0.01:
+            print('WARNING: the US205 mic volume should stay 0.500')
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        base = OUT_DIR / a.name
+        for ext in ('.wav', '.json', '.txt'):
+            if Path(str(base) + ext).exists():
+                sys.exit(f'{base.name}{ext} exists already; pick another --name.')
+        started, notes = time.strftime('%Y-%m-%d %H:%M:%S'), a.notes
+        try:
+            x = sd.rec(int(a.seconds * FS), samplerate=FS, channels=1, dtype='float32', device=dev_in['index'],
+                       extra_settings=sd.WasapiSettings(exclusive=True), blocking=True)[:, 0]
+        except Exception as e:  # noqa: BLE001
+            sys.exit(f'Audio error: {e}. Close REW or anything else that uses the US205.')
+        wavfile.write(str(base) + '.wav', FS, x)
+        meta = dict(fs=FS, started=started, kind='listen', seconds=a.seconds, device=dev_in['name'],
+                    windows_volume=vol, notes=notes)
+        Path(str(base) + '.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    x = x.astype(np.float64)
+    dur = x.size / FS
+    wins = [(0.5, dur)]   # the first 0.5 s: stream start
+    if a.windows:
+        wins = [tuple(float(v) for v in w.split('-')) for w in a.windows.split(',')]
+    specs = [mean_psd(x, lo, hi, skip_frozen=False) for lo, hi in wins]
+    f, p = specs[0][0], specs[0][1]
+    df = f[1] - f[0]
+    if a.f0:
+        f0, f0_text = a.f0, f'f0 {a.f0:.2f} Hz (given)'
+    else:
+        f0, prom = find_f0(f, p, *F0_RANGE)
+        f0_text = f'f0 {f0:.2f} Hz (strongest peak in {F0_RANGE[0]:.0f}-{F0_RANGE[1]:.0f} Hz, {prom:.0f} dB out)'
+        if prom < 10.0:
+            f2, prom2 = find_f0(f, p, 2 * F0_RANGE[0], 2 * F0_RANGE[1])
+            f0_text += (f'; taken as half the 2 f0 line at {f2:.1f} Hz ({prom2:.0f} dB out)' if prom2 >= 10.0
+                        else '; no clear f0 or 2 f0 line: give --f0')
+            if prom2 >= 10.0:
+                f0 = f2 / 2
+    L = [f'{base.name}: {dur:.1f} s from {started}; J17 L rms {db(np.sqrt(np.mean(x ** 2))):.1f}, '
+         f'peak {db(np.max(np.abs(x))):.1f} dBFS', f'Notes: {notes}', f0_text,
+         'Fan lines, dBFS on the US205 as amplitude (power within +-3 bins of the peak near k f0, 0.5 s segments); '
+         '"floor" = dB over the median within +-50 Hz in the first stretch'
+         + ('; "change" = the first stretch minus this one (dB, above 0 = quieter)' if len(wins) > 1 else '') + ':',
+         '  line         Hz' + ''.join(f'{f"{lo:g}-{hi:g} s":>10s}' + ('  floor' if j == 0 else '')
+                                     for j, (lo, hi) in enumerate(wins))
+         + ''.join(f'{"change " + str(j + 1):>10s}' for j in range(1, len(wins)))]
+    p_all = sum(s[1] for s in specs)
+    for k in PICKUP_LINES:
+        i0 = int(round(k * f0 / df))
+        i = i0 - 4 + int(np.argmax(p_all[i0 - 4:i0 + 5]))
+        row, levs = f'  {k:2d} f0 {f[i]:9.1f}', []
+        for j, (_, pj, _) in enumerate(specs):
+            tone = pj[i - 3:i + 4].sum() * df
+            levs.append(10 * np.log10(2 * tone + 1e-30))
+            row += f'{levs[-1]:10.1f}'
+            if j == 0:
+                ring = np.r_[pj[max(i - int(50 / df), 0):i - 5], pj[i + 6:i + int(50 / df) + 1]]
+                row += f' {10 * np.log10(tone / max(np.median(ring) * 7 * df, 1e-30)):+6.1f}'
+        L.append(row + ''.join(f'{levs[0] - v:+10.1f}' for v in levs[1:]))
+    tot = [10 * np.log10(np.sum(pj[(f >= 60) & (f < 20000)]) * df + 1e-30) for _, pj, _ in specs]
+    L.append(f'  {"total 60-20k":15s}' + ''.join(f'{v:10.1f}' + ('       ' if j == 0 else '') for j, v in enumerate(tot))
+             + ''.join(f'{tot[0] - v:+10.1f}' for v in tot[1:]))
+    if a.course:
+        n = FS   # 1 s windows: 1 Hz bins
+        w = np.hanning(n)
+        fr = np.fft.rfftfreq(n, 1 / FS)
+        L += ['Second by second (1 s Hann windows; tones = power within +-3 Hz of k f0, as amplitude):',
+              '        t s     f0   2 f0   6 f0  total']
+        for t0 in np.arange(0.0, dur - 1.0 + 1e-9, 1.0):
+            i0 = int(t0 * FS)
+            ps = 2 * np.abs(np.fft.rfft(x[i0:i0 + n] * w)) ** 2 / (FS * np.sum(w ** 2))
+            lv = [10 * np.log10(2 * ps[int(round(k * f0)) - 3:int(round(k * f0)) + 4].sum() + 1e-30) for k in (1, 2, 6)]
+            L.append(f'  {t0:5.0f}-{t0 + 1:<4.0f}' + ''.join(f'{v:7.1f}' for v in lv)
+                     + f'{10 * np.log10(ps[(fr >= 60) & (fr < 20000)].sum() + 1e-30):7.1f}')
+    txt = '\n'.join(L)
+    print(txt)
+    Path(str(base) + '.txt').write_text(txt + '\n', encoding='utf-8')
+
+
 # ---------------------------------------------------------------- slide figures
 
 C_RUN = ('#2a6fdb', '#e8702a', '#5b2c83')    # runs in this fixed order; OKLab CVD checks pass for every pair and C_OFF
@@ -1501,6 +1600,14 @@ def main():
                                       'or after the DAC')
     u.add_argument('wav')
     u.add_argument('--f0', type=float, help='fan f0 in Hz (default: from the live wait phase)')
+    li = sub.add_parser('listen', help='record J17 L without loading anything, print the fan lines (setup A/B checks)')
+    li.add_argument('--name', help='"MMDD ..." file name in measurements/anc_test/ for a new recording')
+    li.add_argument('--wav', help='analyze this earlier listen recording again instead of recording')
+    li.add_argument('--seconds', type=float, default=10.0)
+    li.add_argument('--f0', type=float, help='fan f0 in Hz (default: the f0 peak, else half the 2 f0 line)')
+    li.add_argument('--windows', help='"a-b,c-d,...": stretches in s, each compared with the first (e.g. off, then on)')
+    li.add_argument('--course', action='store_true', help='also the lines second by second (find an SW3 / SW4 press)')
+    li.add_argument('--notes', default='', help='what is plugged in and powered, fan duty, ...')
     s = sub.add_parser('synth')
     s.add_argument('wav')
     a = ap.parse_args()
@@ -1519,6 +1626,8 @@ def main():
         track(a.wav, a.step)
     elif a.cmd == 'pickup':
         pickup(a.wav, a.f0)
+    elif a.cmd == 'listen':
+        listen(a)
     else:
         synth(a.wav)
 
