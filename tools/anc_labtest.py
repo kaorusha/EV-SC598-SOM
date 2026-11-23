@@ -17,6 +17,8 @@ that load and switch it on before ANC starts (ANC_START_DELAY_S after boot). A r
                                                          slide figures for 1-3 runs (below)
   python tools/anc_labtest.py diag <wav>                 ANC_DIAG output after a divergence trip ([DIAG] lines, snapshot)
   python tools/anc_labtest.py track <wav> [--step S]     second by second: fan f0 and tones, frozen J17 L (dumps)
+  python tools/anc_labtest.py pickup <wav> [--f0 HZ]     fan lines inside vs outside the wait-phase print freezes:
+                                                         through the core (ADC side) or after the DAC
   python tools/anc_labtest.py synth <wav>                synthetic recording to test the analysis
 
 The CrossCore Embedded Studio folder (CCES_runner.exe, SHARC/ldr/ezkitSC598W_preload_core1.dxe) comes from --cces or
@@ -899,6 +901,97 @@ def track(wav, step=1.0):
     Path(str(base) + ' track.txt').write_text(txt + '\n', encoding='utf-8')
 
 
+PICKUP_SEG_S = 0.2           # pickup: Hann segment, short enough to fit inside a wait-phase print freeze (~0.34 s)
+PICKUP_MARGIN_S = 0.03       # ... taken this far inside the freeze edges that print_freezes finds
+PICKUP_LINES = (1, 2, 3, 4, 5, 6, 12, 18)   # fan lines k f0
+
+
+def pickup(wav, f0=None):
+    """Which lines come through the core and which enter after the DAC, from the wait phase before the ANC start
+    (speaker silent). Each status print halts the core for about 0.34 s while the SPORT DMA replays its last buffers,
+    so J17 L then carries nothing new from the ADC side (Err mic, mic board, J12, ADC). A line that keeps its level
+    inside those freezes enters after the DAC (J17 L, the cable, the US205); a line that drops comes through the
+    core. Compares each fan line inside the freezes with the same line live in between (PICKUP_SEG_S Hann segments),
+    each against its local floor (median within +-50 Hz). Made for the 2 f0 check (2026-11-23): on 2026-11-19 the
+    2 f0 line kept its level through a 13 s diagnostics freeze. Prints and writes <name> pickup.txt."""
+    base, x, meta, log = load_run(wav)
+    t_r, t_x = meta['runner_start_s'], meta['runner_exit_s']
+    if 'anc_start_s' in meta:
+        ta, ta_how = meta['anc_start_s'], 'anc_start_s in the .json'
+    else:
+        ta, ta_how = find_anc_start(x, log, t_r, t_x)
+    a, b = t_r + PROG_AFTER_RUNNER + 1.0, ta - 0.2      # program running (after the codec setup), ANC not started
+    n = int(PICKUP_SEG_S * FS)
+    w = np.hanning(n)
+    f = np.fft.rfftfreq(n, 1 / FS)
+    df = f[1] - f[0]
+
+    def psd(spans):   # mean one-sided PSD (FS^2/Hz) of half-overlapping segments inside the spans
+        acc, k = np.zeros(f.size), 0
+        for s, e in spans:
+            for i in range(int(s * FS), int(e * FS) - n + 1, n // 2):
+                acc += 2 * np.abs(np.fft.rfft(x[i:i + n] * w)) ** 2 / (FS * np.sum(w ** 2))
+                k += 1
+        return acc / max(k, 1), k
+
+    def rms(spans):
+        v = np.concatenate([x[int(s * FS):int(e * FS)] for s, e in spans]) if spans else np.zeros(1)
+        return 10 * np.log10(np.mean(v ** 2) + 1e-30)
+
+    fz = print_freezes(x, a, b)
+    frozen = [(s + PICKUP_MARGIN_S, e - PICKUP_MARGIN_S) for s, e in fz]
+    frozen = [(s, e) for s, e in frozen if e - s >= PICKUP_SEG_S]
+    edges = [a] + [v for s, e in fz for v in (s - 0.1, e + 0.1)] + [b]
+    live = [(s, e) for s, e in zip(edges[::2], edges[1::2]) if e - s >= PICKUP_SEG_S]
+    p_live, n_live = psd(live)
+    p_frz, n_frz = psd(frozen)
+    if f0 is not None:
+        f0_text = f'f0 {f0:.2f} Hz (given)'
+    else:
+        fl, pl, _ = mean_psd(x, a, b)
+        f0, prom = find_f0(fl, pl, *F0_RANGE)
+        f0_text = (f'f0 {f0:.2f} Hz (strongest peak in {F0_RANGE[0]:.0f}-{F0_RANGE[1]:.0f} Hz, '
+                   f'{prom:.0f} dB over its surroundings)')
+        if prom < 10.0:   # no acoustic f0 (Err mic unplugged): half the 2 f0 line
+            f2, prom2 = find_f0(fl, pl, 2 * F0_RANGE[0], 2 * F0_RANGE[1])
+            if prom2 >= 10.0:
+                f0, f0_text = f2 / 2, (f'f0 {f2 / 2:.2f} Hz = half the 2 f0 line at {f2:.1f} Hz ({prom2:.0f} dB over '
+                                       f'its surroundings; the f0 peak stood only {prom:.0f} dB out)')
+
+    def level(p, i):   # (amplitude dBFS, dB over the floor) of the line in bins i-2 .. i+2
+        tone = p[i - 2:i + 3].sum() * df
+        ring = np.r_[p[max(i - int(50 / df), 0):i - 3], p[i + 4:i + int(50 / df) + 1]]
+        return 10 * np.log10(2 * tone + 1e-30), 10 * np.log10(tone / max(np.median(ring) * 5 * df, 1e-30))
+
+    L = [f'{Path(wav).name}: wait phase {a:.1f}-{b:.1f} s (speaker silent); ANC start {ta:.2f} s: {ta_how}',
+         f'Notes: {meta.get("notes", "")}', f0_text,
+         f'{len(fz)} print freezes in the wait phase, {len(frozen)} long enough: {n_frz} frozen and {n_live} live '
+         f'segments of {PICKUP_SEG_S:g} s. J17 L rms live {rms(live):.1f}, frozen {rms(frozen):.1f} dBFS']
+    if not frozen:
+        L.append('No usable freezes (J17 L too quiet to show them?): live levels only.')
+    L += ['Fan lines, dBFS on the US205 as amplitude (power within +-2 bins); "floor" = dB over the median '
+          'within +-50 Hz:', '  line         Hz     live  floor   frozen  floor  live-frozen']
+    for k in PICKUP_LINES:
+        i0 = int(round(k * f0 / df))
+        i = i0 - 3 + int(np.argmax((p_live + p_frz)[i0 - 3:i0 + 4]))   # the line's bin, live or frozen
+        lv, lv_snr = level(p_live, i)
+        row = f'  {k:2d} f0 {f[i]:9.1f}  {lv:7.1f} {lv_snr:+6.1f}'
+        if n_frz:
+            fv, fv_snr = level(p_frz, i)
+            d = lv - fv
+            what = ('not above the floor' if lv_snr < 6 else 'through the core' if d >= 10
+                    else 'after the DAC' if abs(d) <= 3 and fv_snr >= 10 else 'both, or unclear')
+            row += f'  {fv:7.1f} {fv_snr:+6.1f}  {d:+8.1f}    {what}'
+        L.append(row)
+    L.append('Reading: live - frozen >= 10 dB: through the core (Err mic, mic board, J12, ADC); within 3 dB with the '
+             'frozen line >= 10 dB over its floor: enters after the DAC (J17 L, cable, US205).')
+    L += ['Core status lines in the wait (levels in the Ref band, as the core sees them):']
+    L += ['  ' + l for l in log['status'] if 'wait' in l][-2:]
+    txt = '\n'.join(L)
+    print(txt)
+    Path(str(base) + ' pickup.txt').write_text(txt + '\n', encoding='utf-8')
+
+
 # ---------------------------------------------------------------- slide figures
 
 C_RUN = ('#2a6fdb', '#e8702a', '#5b2c83')    # runs in this fixed order; OKLab CVD checks pass for every pair and C_OFF
@@ -1404,6 +1497,10 @@ def main():
     k = sub.add_parser('track', help='second by second: fan f0 and tones, 7-12 kHz, total, frozen J17 L')
     k.add_argument('wav')
     k.add_argument('--step', type=float, default=1.0, help='seconds between the 1 s windows')
+    u = sub.add_parser('pickup', help='fan lines inside vs outside the wait-phase print freezes: through the core '
+                                      'or after the DAC')
+    u.add_argument('wav')
+    u.add_argument('--f0', type=float, help='fan f0 in Hz (default: from the live wait phase)')
     s = sub.add_parser('synth')
     s.add_argument('wav')
     a = ap.parse_args()
@@ -1420,6 +1517,8 @@ def main():
         diag(a.wav)
     elif a.cmd == 'track':
         track(a.wav, a.step)
+    elif a.cmd == 'pickup':
+        pickup(a.wav, a.f0)
     else:
         synth(a.wav)
 
