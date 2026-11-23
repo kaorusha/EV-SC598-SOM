@@ -34,6 +34,14 @@ knob, the firmware actually flashed), and the export date, tool commit and comma
 
   python tools/export_paths.py S "measurements/sweep/2026-11-06/1106 S -3 4M away48k fix.npz" --conditions "..."
   python tools/export_paths.py F "measurements/sweep/2026-11-05/1105 F -12 2M.npz" --legacy-192k
+
+On site (the demo script), the tracked headers stay as they are. --runtime writes the same taps to
+measurements/anc_paths/second_path.bin or feedback_path.bin (gitignored), which the ANC firmware reads over JTAG at
+start-up instead of the compiled-in header (ANC_PATHS_FROM_HOST in Audio_Talkthrough_I2S.c; the banner says which it
+used), so no rebuild is needed. Delete the .bin files to go back to the headers. --from-header writes the compiled-in
+taps as those files, which changes nothing and tests the load:
+  python tools/export_paths.py S "<npz>" --runtime
+  python tools/export_paths.py F --runtime --from-header
 """
 import argparse
 import datetime
@@ -62,6 +70,10 @@ HEADER = {'S': ('second_path.h', 'SECOND_PATH', 'Secondary path S-hat: core y(n)
           'F': ('feedback_path.h', 'FEEDBACK_PATH', 'Feedback path F-hat: core y(n-1) -> core Ref')}
 TOOL_INPUTS = ('tools/export_paths.py', 'tools/pathmeas.py', 'anc_rate.h', 'Audio_Talkthrough_I2S.h')   # shape the taps
 COMMENT_WIDTH = 120
+# --runtime: files the ANC firmware reads over JTAG at start-up instead of the compiled-in headers
+# (Audio_Talkthrough_I2S.c ANC_PATHS_FROM_HOST, same names and format); measurements/ is gitignored
+RUNTIME = {'S': ('measurements/anc_paths/second_path.bin', 0), 'F': ('measurements/anc_paths/feedback_path.bin', 1)}
+RUNTIME_NOTE = 108             # bytes of ASCII note in the 128-byte file header
 
 
 def rate_filter():
@@ -182,14 +194,52 @@ def write_header(path, h, source, meta, note, stats, conditions, command):
     (REPO / fname).write_text('\n'.join(lines), encoding='utf-8')
 
 
+def header_taps(path):
+    """The taps compiled into the firmware now (second_path.h / feedback_path.h)."""
+    fname, sym, _ = HEADER[path]
+    src = (REPO / fname).read_text(encoding='utf-8')
+    body = src[src.index(f'{sym}[{sym}_TAPS] = {{'):]
+    h = np.array([float(v) for v in re.findall(r'([-+]?\d\.\d+e[-+]\d+)f', body[:body.index('};')])], np.float32)
+    if h.size != TAPS:
+        sys.exit(f'{fname}: {h.size} taps, expected {TAPS}')
+    return h
+
+
+def write_runtime(path, h, note):
+    """measurements/anc_paths/*.bin for the firmware's start-up load (ANC_PATHS_FROM_HOST): "ANCP", little-endian
+    uint32 version 1, path (0 = S, 1 = F), fs, taps, RUNTIME_NOTE bytes of ASCII note, then float32 taps."""
+    rel, code = RUNTIME[path]
+    text = note.encode('ascii', 'replace')[:RUNTIME_NOTE - 1]
+    head = b'ANCP' + np.array([1, code, 48000, TAPS], '<u4').tobytes() + text.ljust(RUNTIME_NOTE, b'\0')
+    out = REPO / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(head + np.asarray(h, '<f4').tobytes())
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description='Write S-hat / F-hat headers for the 48 kHz ANC core from a pathmeas .npz.')
     ap.add_argument('path', choices=('S', 'F'))
-    ap.add_argument('npz', help='"<MMDD> <path> <level> <length> [tag].npz" from pathmeas.py')
+    ap.add_argument('npz', nargs='?', help='"<MMDD> <path> <level> <length> [tag].npz" from pathmeas.py')
     ap.add_argument('--legacy-192k', action='store_true', help='the .npz comes from the pre-2026-11-05 192 kHz firmware')
     ap.add_argument('--conditions', default='', help='measurement conditions for the header that the run notes miss '
                                                      '(who was in front of the outlet, speaker knob, firmware flashed)')
+    ap.add_argument('--runtime', action='store_true',
+                    help='write measurements/anc_paths/*.bin, which the ANC firmware reads at start-up over JTAG, '
+                         'instead of the tracked header (on-site measurements, the demo script)')
+    ap.add_argument('--from-header', action='store_true',
+                    help='with --runtime: copy the compiled-in header taps instead of an npz (the file then changes '
+                         'nothing, for testing the start-up load)')
     a = ap.parse_args()
+    if a.from_header:
+        if not a.runtime:
+            sys.exit('--from-header only goes with --runtime.')
+        out = write_runtime(a.path, header_taps(a.path),
+                            f'copy of {HEADER[a.path][0]}, {datetime.datetime.now():%Y-%m-%d %H:%M}')
+        print(f'{repo_rel(out)}: the {HEADER[a.path][0]} taps')
+        return
+    if not a.npz:
+        sys.exit('Give the npz (or --runtime --from-header).')
     src = Path(a.npz)
     z = np.load(src)
     meta = json.loads(str(z['meta']))
@@ -209,8 +259,14 @@ def main():
     source = repo_rel(src)
     command = (f'python tools/export_paths.py {a.path} "{source}"' + (' --legacy-192k' if a.legacy_192k else '')
                + (' --conditions "<Conditions above>"' if a.conditions else ''))
-    write_header(a.path, h, source, meta, note, stats, a.conditions, command)
-    print(f"{HEADER[a.path][0]}: {note}; onset tap {stats['onset']} ({stats['onset'] / fs * 1e3:.3f} ms), peak tap "
+    if a.runtime:
+        out = write_runtime(a.path, h, f'{src.stem}, measured {meta["started"]}, exported '
+                                       f'{datetime.datetime.now():%Y-%m-%d %H:%M}')
+        target = repo_rel(out)
+    else:
+        write_header(a.path, h, source, meta, note, stats, a.conditions, command)
+        target = HEADER[a.path][0]
+    print(f"{target}: {note}; onset tap {stats['onset']} ({stats['onset'] / fs * 1e3:.3f} ms), peak tap "
           f"{stats['peak']} ({stats['peak'] / fs * 1e3:.3f} ms), energy kept {stats['kept']:.2f}%")
 
 
