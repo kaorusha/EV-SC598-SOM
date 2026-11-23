@@ -9,8 +9,7 @@ folder system/). It only compiles: nothing is linked, so memory placement is not
   python tools/compile_check.py [--cces DIR] [--only NAME ...] [--keep DIR] [--list]
 
 The CrossCore Embedded Studio folder (cc21k.exe) comes from --cces or the CCES_ROOT environment variable. The exit
-status is 1 when a variant fails or prints a warning. Run it before every firmware commit; a header-only change still
-needs Clean + Build in CCES (see the -absolute-path-dependencies note in the project).
+status is 1 when a variant fails or prints a warning. Run it before every firmware commit.
 """
 import argparse
 import os

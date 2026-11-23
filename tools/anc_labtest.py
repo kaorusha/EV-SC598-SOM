@@ -143,7 +143,7 @@ def runner_cmd(runner, preload, timeout_s):
 
 
 def build_state():
-    """(ok, text): the Release .dxe exists and is newer than every firmware source (header-only edits need a Clean)."""
+    """(ok, text): the Release .dxe exists and is newer than every firmware source."""
     if not DXE.exists():
         return False, f'no Release build at {DXE.name}'
     t_dxe = DXE.stat().st_mtime
@@ -151,7 +151,7 @@ def build_state():
     ok = t_dxe > newest.stat().st_mtime
     fmt = lambda t: time.strftime('%m/%d %H:%M:%S', time.localtime(t))  # noqa: E731
     return ok, (f'.dxe {fmt(t_dxe)}, newest source {newest.name} {fmt(newest.stat().st_mtime)}'
-                + ('' if ok else '  -> STALE, build first (Clean + Build after a header-only change)'))
+                + ('' if ok else '  -> STALE, build first'))
 
 
 def check(sd, listen_s=2.0):
