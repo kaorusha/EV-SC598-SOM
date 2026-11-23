@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Secondary / feedback path measurement with an embedded electrical timing reference.
 
-Firmware: APP_MODE_PATH_MEASURE (Audio_Talkthrough_I2S.c)
+Firmware: APP_MODE_PATH_MEASURE (Audio_Talkthrough_I2S.c), built by the CCES configuration PathMeasure (PATHMEAS_DXE);
+the source's own default is ANC
   PC Left  -> J16 Left  -> x CALIBRATION_CHIRP_GAIN -> added to J17 Left and J17 Right
   PC Right -> J16 Right -> J18 Right -> speaker
   J17 Left  = Error mic + reference -> secondary path S
@@ -63,6 +64,9 @@ from scipy.io import wavfile
 
 REPO = Path(__file__).resolve().parents[1]
 FIRMWARE_C = REPO / 'Audio_Talkthrough_I2S.c'
+PATHMEAS_DXE = (REPO / 'EV-SOMCRR-EZKIT' / 'SC598' / 'sharc' / 'AD_Talkthrough_I2S_SC598_SHARC_Core1' / 'PathMeasure'
+                / 'AD_Talkthrough_I2S_SC598_SHARC_Core1.dxe')   # CCES configuration PathMeasure: -D APP_MODE
+BRIDGE_BANNER = b'Path Measurement Bridge'   # in the bridge's boot banner, so in its .dxe
 DATA_ROOT = REPO / 'measurements' / 'sweep'
 
 DEVICE = 'USB Audio Device'   # UGREEN US205 in the WASAPI device list
@@ -113,14 +117,32 @@ def length_tag(n):
 
 
 def firmware_settings():
-    """CALIBRATION_CHIRP_GAIN and APP_MODE from the firmware source (the board runs them if it is up to date)."""
+    """CALIBRATION_CHIRP_GAIN from the firmware source (the board runs it if its build is up to date)."""
     try:
         src = FIRMWARE_C.read_text(encoding='utf-8', errors='replace')
     except OSError:
-        return 0.05, None
+        return 0.05
     gain = re.search(r'#define\s+CALIBRATION_CHIRP_GAIN\s+([0-9.eE+-]+)', src)
-    mode = re.search(r'#define\s+APP_MODE\s+(\w+)', src)
-    return (float(gain.group(1)) if gain else 0.05), (mode.group(1) if mode else None)
+    return float(gain.group(1)) if gain else 0.05
+
+
+def pathmeas_build():
+    """The PathMeasure build on disk, as (record for the run's 'firmware', warnings). The source's APP_MODE is only
+    the default (ANC); the bridge is that build, which the board runs if it was loaded from PATHMEAS_DXE."""
+    rel = PATHMEAS_DXE.relative_to(REPO).as_posix()
+    try:
+        built = PATHMEAS_DXE.stat().st_mtime
+        bridge = BRIDGE_BANNER in PATHMEAS_DXE.read_bytes()
+    except OSError:
+        return {}, [f'no {rel}: build the CCES configuration PathMeasure']
+    t = datetime.datetime.fromtimestamp(built)
+    rec = dict(app_mode='APP_MODE_PATH_MEASURE') if bridge else {}
+    rec['build'] = f'PathMeasure build {t:%Y-%m-%d %H:%M}'
+    warn = [] if bridge else [f'{rel} is not the bridge: check APP_MODE=APP_MODE_PATH_MEASURE in its compiler -D']
+    newer = [p.name for p in sorted(REPO.glob('*.[ch]')) if p.stat().st_mtime > built]
+    if newer:
+        warn.append(f"{', '.join(newer)} changed after the PathMeasure build ({t:%m-%d %H:%M}): build it again")
+    return rec, warn
 
 
 def git_state(paths=()):
@@ -136,13 +158,13 @@ def git_state(paths=()):
 
 
 def source_text(state):
-    """'d1ae254 + uncommitted Audio_Talkthrough_I2S.c, APP_MODE_PATH_MEASURE' for a git_state() result (a run's
-    'firmware' record adds app_mode)."""
+    """'d1ae254 + uncommitted Audio_Talkthrough_I2S.c, APP_MODE_PATH_MEASURE, PathMeasure build 2026-11-20 17:28' for
+    a git_state() result (a run's 'firmware' record adds app_mode, and since 2026-11-20 the build)."""
     state = state or {}
     text = state.get('commit') or 'no git checkout'
     if state.get('modified'):
         text += ' + uncommitted ' + ', '.join(state['modified'])
-    return text + (f", {state['app_mode']}" if state.get('app_mode') else '')
+    return ', '.join([text] + [state[k] for k in ('app_mode', 'build') if state.get(k)])
 
 
 def import_sounddevice():
@@ -447,7 +469,7 @@ def analyse_run(rec, meta, correct_wander=True):
             warn.append(f'harmonic {k} of the path lands in the analysis windows: use a longer sweep')
     purity = float(db(env[p] / env[p - int(0.05 * fs):p - int(0.005 * fs)].max()))
     if purity < 30:
-        warn.append(f'reference only {purity:.0f} dB above the 5-50 ms before it: check APP_MODE and the PC Left cable')
+        warn.append(f'reference only {purity:.0f} dB above the 5-50 ms before it: check that the board runs the PathMeasure build, and the PC Left cable')
 
     win = fade_window(WIN, fs)
     nfft = 2 * WIN
@@ -921,7 +943,8 @@ def next_stem(folder, mmdd, path, level, length, tag):
 def cmd_measure(a):
     sd = import_sounddevice()
     dev_in, dev_out = wasapi_devices(sd, a.device)
-    chirp_gain, mode = firmware_settings()
+    chirp_gain = firmware_settings()
+    build, build_warn = pathmeas_build()
     n_sweep = parse_length(a.length)
     exclusive = not a.shared
     for check, dev, ch in ((sd.check_output_settings, dev_out, 2), (sd.check_input_settings, dev_in, 1)):
@@ -936,7 +959,7 @@ def cmd_measure(a):
                 tag=a.tag, fs=FS, f1=F1, f2=F2, n_sweep=n_sweep, n_lead=int(LEAD_S * FS),
                 n_delay=int(DELAY_S * FS), n_tail=int(TAIL_S * FS), n_refs=N_REFS, ref_dbfs=a.ref_level,
                 chirp_gain=chirp_gain, device_out=dev_out['name'], device_in=dev_in['name'],
-                exclusive=exclusive, notes=a.notes, firmware=dict(git_state() or {}, app_mode=mode))
+                exclusive=exclusive, notes=a.notes, firmware=dict(git_state() or {}, **build))
     run_s = (base['n_lead'] + N_REFS * base['n_delay'] + n_sweep + base['n_tail']) / FS + PREROLL_S + MARGIN_S
     jack = JACK[a.path]
     print(f"Output {dev_out['name']}, input {dev_in['name']}, WASAPI {'exclusive' if exclusive else 'shared'}, {FS} Hz")
@@ -949,8 +972,8 @@ def cmd_measure(a):
     if any(e.get('mute') for e in vol.values()):
         sys.exit('A muted endpoint plays or records silence. Unmute it in Windows, then try again.')
     print(f'Path {a.path}: {jack} must be in the US205 mic input. Chirp gain {chirp_gain:g} from the firmware source.')
-    if mode != 'APP_MODE_PATH_MEASURE':
-        print(f'WARNING: the firmware source selects {mode}; the board must run APP_MODE_PATH_MEASURE.')
+    for w in build_warn:
+        print(f'WARNING: {w}')
     print(f"Sweep {base['length']} ({n_sweep / FS:.1f} s), {F1:g} Hz-{F2 / 1000:g} kHz. {N_REFS} references on PC Left "
           f"at {a.ref_level:g} dBFS; speaker drive on PC Right at {', '.join(f'{L:g}' for L in a.levels)} dBFS; "
           f'{a.repeats} run(s) each, about {len(a.levels) * a.repeats * run_s / 60:.1f} min in total.')
