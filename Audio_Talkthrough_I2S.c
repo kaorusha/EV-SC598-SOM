@@ -231,7 +231,7 @@ to the terms of the associated Analog Devices License Agreement.
  *   2  off before PUP, on DAC_SETTLE_MS after the set-up, then the unmute. Writes before PUP do not hold (11/24): the
  *      same as 1
  *   3  off right after PUP (TWI time, BITRATE), on DAC_SETTLE_MS after the set-up, then the unmute. Cuts the PUP spike
- *      to about 0.3 ms, but while DAC1-12 are off the outputs float, so after a power-up DAC1-12 on steps them from
+ *      to about 0.08 ms, but while DAC1-12 are off the outputs float, so after a power-up DAC1-12 on steps them from
  *      0 V to 1.5 V instead (11/24: as large after 2 s as after 0.44 s). Only a slow ramp of the DAC data from -full
  *      scale to 0 after DAC1-12 on would avoid that step (not done; right after a power-up only). */
 #define DAC_POWER_ORDER         1

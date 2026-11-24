@@ -38,8 +38,12 @@ to the terms of the associated Analog Devices License Agreement.
 #define SPORT_DEVICE_4B 			4u			/* SPORT device number */
 #define TWIDEVNUM     				2u         /* TWI device number */
 
-#define BITRATE       				(100u)      /* kHz */
-#define DUTYCYCLE     				(50u)       /* percent */
+/* Codec TWI (ADAU1962A, ADAU1979; the soft switches set their own 100 kHz). 400 kHz since 2026-11-24: the DAC1-12
+ * power-down then lands about 0.08 ms after PUP instead of 0.3 ms (boot pop, DAC_POWER_ORDER 3). The driver counts in
+ * 10 MHz ticks but the prescaler gives 9.375 MHz: 25 ticks = 375 kHz, SCL high 10 ticks (1.07 us), low 15 (1.6 us);
+ * both codecs need low >= 1.3 us, high >= 0.6 us, so not 50 %. */
+#define BITRATE       				(400u)      /* kHz */
+#define DUTYCYCLE     				(40u)       /* percent of the period SCL is high */
 #define PRESCALEVALUE 				(12u)       /* fSCLK/10MHz (112.5 sclk0_0) */
 #define BUFFER_SIZE   				(8u)
 
