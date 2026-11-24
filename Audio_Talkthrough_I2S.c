@@ -219,20 +219,70 @@ to the terms of the associated Analog Devices License Agreement.
 #define DMA_PROBE_TRACE_LEN     256u
 #define DMA_PROBE_FILE          "measurements/dma_probe/dma_probe.txt"      /* in this repo (Host_Path); folder must exist */
 
+/* Boot pop (2026-11-23/24, tools/boot_pop.py, measurements/README.md 開機爆音). J18 L/R are the single-ended
+ * DAC3P/DAC4P outputs through a 10 uF series capacitor (no buffer, no mute). After a board power-up the capacitor is
+ * empty and the outputs sit at 0 V; the first time DAC1-12 drive them, they step to the 1.5 V common mode: the big boot
+ * pop. After a reload the capacitor still holds 1.5 V, and only a small blip is left.
+ * DAC_POWER_ORDER sets when DAC1-12 are powered (PDN_CTRL_2/3):
+ *   0  ADI's table: on from PUP, off right after the PLL lock (0.14 s after PUP, before the codec has settled) and on
+ *      again before the unmute: two more steps, 16 dB below the PUP one
+ *   1  on from PUP, never switched. The outputs follow the common mode's own rise: the smallest power-up pop of the
+ *      four (11/24)
+ *   2  off before PUP, on DAC_SETTLE_MS after the set-up, then the unmute. Writes before PUP do not hold (11/24): the
+ *      same as 1
+ *   3  off right after PUP (TWI time, BITRATE), on DAC_SETTLE_MS after the set-up, then the unmute. Cuts the PUP spike
+ *      to about 0.3 ms, but while DAC1-12 are off the outputs float, so after a power-up DAC1-12 on steps them from
+ *      0 V to 1.5 V instead (11/24: as large after 2 s as after 0.44 s). Only a slow ramp of the DAC data from -full
+ *      scale to 0 after DAC1-12 on would avoid that step (not done; right after a power-up only). */
+#define DAC_POWER_ORDER         1
+#define DAC_SETTLE_MS           2000u  /* orders 2, 3: from the set-up to DAC1-12 on */
+
+/* Boot pop tests (tools/boot_pop.py), keep 0 otherwise:
+ *   1  timing probe: the set-up busy-waits a different time after each codec action (POP_WAIT: P0 2.0 s, then
+ *      0.6-1.9 s in 0.1 s steps), so the steps recorded on J18 R map to the actions by their spacing. Waits only, no
+ *      prints; the boot takes about 15 s longer.
+ *   2  fix test: the codec reset is held POP_RESET_MS, and the DAC power order and settling wait come from
+ *      POP_ORDER_FILE ("order [ms]", boot_pop.py load --order --settle writes it; DAC_POWER_ORDER and DAC_SETTLE_MS for
+ *      what it does not give). The long reset makes the PUP spike of a reload as large as after a power-up, but the
+ *      output capacitor still holds 1.5 V, so orders 2 and 3 need a real power-up to be judged. */
+#define POP_PROBE               0
+#define POP_RESET_MS            3000u
+#define POP_ORDER_FILE          "measurements/boot_check/pop_order.txt"   /* in this repo (Host_Path) */
+
+/* Busy-waits ms milliseconds on EMUCLK (32 bits, so in 1 ms pieces) */
+static void Wait_Ms(uint32_t ms)
+{
+	uint32_t i;
+	for (i = 0u; i < ms; i++)
+	{
+		cycle_t start, now;
+		START_CYCLE_COUNT(start);
+		do
+		{
+			START_CYCLE_COUNT(now);
+		} while ((uint32_t)now - (uint32_t)start < (uint32_t)(CORE_CLOCK_HZ / 1000.0f));
+	}
+}
+
+#if (POP_PROBE == 1)
+#define POP_WAIT(ms)            Wait_Ms(ms)
+#else
+#define POP_WAIT(ms)            ((void)0)
+#endif
+
 struct Config_Table
 {
 	short Reg_Add;
 	char  Value;
 };
 
-char Config_read_DAC[28];
 char Config_read_ADC[16];
 int count;
-struct Config_Table Config_array_DAC[28] = {
+/* ADAU1962A set-up after PUP: row 1 mutes, the last row unmutes. ADAU_1962_init powers DAC1-12 down and up around
+ * them (PDN_CTRL_2/3, DAC_POWER_ORDER). */
+struct Config_Table Config_array_DAC[] = {
 		   	    {     ADAU1962_PDN_CTRL_1,		0x00},
-		   	    {     ADAU1962_PDN_CTRL_2,	    0xff},
-		   	    {     ADAU1962_PDN_CTRL_3,	    0x0f},
-		   	    {     ADAU1962_DAC_CTRL0,		0x01},
+		   	    {     ADAU1962_DAC_CTRL0,		0x01}, /* MMUTE until the last row */
 		   	    {     ADAU1962_DAC_CTRL1,		0x01}, /* Master, LRCLK 50% duty + normal polarity: DAC slot 0 = SPORT slot 2 (see slot mapping NOTE) */
 		   	    {     ADAU1962_DAC_CTRL2,		DAC_CTRL2_OSR},
 		   	    {     ADAU1962_DAC_MUTE1,	    0x0},
@@ -254,11 +304,11 @@ struct Config_Table Config_array_DAC[28] = {
 				{     ADAU1962_DAC_PWR1,		0xaa},
 				{     ADAU1962_DAC_PWR2,		0xaa},
 				{     ADAU1962_DAC_PWR3,		0xaa},
-				{     ADAU1962_PDN_CTRL_2,	    0x00}, /* Power up DAC 1~8 (0x00 = all active in ADAU1962) */
-				{     ADAU1962_PDN_CTRL_3,	    0x00}, /* Power up DAC 9~12 */
-				{     ADAU1962_DAC_CTRL0,		DAC_CTRL0_FS}
+				{     ADAU1962_DAC_CTRL0,		DAC_CTRL0_FS}  /* unmute + TDM4 192 kHz: keep it last */
 
 };
+#define DAC_ROWS                ((int)(sizeof(Config_array_DAC) / sizeof(Config_array_DAC[0])))
+char Config_read_DAC[DAC_ROWS];
 
 struct Config_Table Config_array_ADC[16] = {
 		 {ADAU1979_REG_BOOST			,	0x00},
@@ -280,10 +330,10 @@ struct Config_Table Config_array_ADC[16] = {
 };
 
 /*=============  L O C A L    F U N C T I O N    P R O T O T Y P E S =============*/
-static int ADAU_1962_Pllinit(void);
+static int ADAU_1962_Pllinit(int order);
 static int ADAU_1979_Pllinit(void);
 void Switch_Configurator(void);
-static int ADAU_1962_init(void);
+static int ADAU_1962_init(int order, uint32_t settleMs);
 static int ADAU_1979_init(void);
 void SRU_Init(void);
 static int Sport_Init(void);
@@ -400,7 +450,7 @@ static void Update_Adc_Capture(const int *pIn)
 }
 #endif
 
-#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE || ANC_DIAG_REPORT || ANC_PATHS_FROM_HOST_ON
+#if ENABLE_ADC_CAPTURE || ENABLE_DMA_PROBE || ANC_DIAG_REPORT || ANC_PATHS_FROM_HOST_ON || (POP_PROBE == 2)
 /* Host PC path of a repo-relative file read or written over JTAG: this source file's folder + rel. CCES compiles linked
  * sources by absolute path, so __FILE__ holds the repo folder of whichever PC built it. */
 static const char *Host_Path(const char *rel)
@@ -415,6 +465,44 @@ static const char *Host_Path(const char *rel)
 	snprintf(path, sizeof(path), "%.*s%s", (int)n, src, rel);
 	return path;
 }
+#endif
+
+#if (POP_PROBE == 2)
+static int s_DacOrder = DAC_POWER_ORDER;
+static uint32_t s_DacSettleMs = DAC_SETTLE_MS;
+#define DAC_ORDER               s_DacOrder
+#define DAC_SETTLE              s_DacSettleMs
+
+/* This boot's DAC power order and settling wait from POP_ORDER_FILE ("order [ms]", order 0-3, ms 0-10000);
+ * DAC_POWER_ORDER and DAC_SETTLE_MS for what it does not give */
+static void Pop_Order(void)
+{
+	FILE *fp = fopen(Host_Path(POP_ORDER_FILE), "r");
+	int v = -1, ms = -1;
+	if (fp != NULL)
+	{
+		if (fscanf(fp, "%d %d", &v, &ms) < 1)
+		{
+			v = -1;
+		}
+		fclose(fp);
+	}
+	if ((v >= 0) && (v <= 3))
+	{
+		s_DacOrder = v;
+	}
+	if ((ms >= 0) && (ms <= 10000))
+	{
+		s_DacSettleMs = (uint32_t)ms;
+	}
+	printf("[POP] Fix test: codec reset held %u ms, DAC power order %d%s, DAC1-12 settle %u ms%s\n", POP_RESET_MS,
+		   s_DacOrder, (s_DacOrder == v) ? "" : " (DAC_POWER_ORDER)", (unsigned)s_DacSettleMs,
+		   ((uint32_t)ms == s_DacSettleMs) ? "" : " (DAC_SETTLE_MS)");
+	fflush(stdout);
+}
+#else
+#define DAC_ORDER               DAC_POWER_ORDER
+#define DAC_SETTLE              DAC_SETTLE_MS
 #endif
 
 #if ANC_PATHS_FROM_HOST_ON
@@ -1084,6 +1172,10 @@ void Switch_Configurator()
 
 	/* Software Switch Configuration for Enabling ADC-DAC */
 	ConfigSoftSwitches_ADC_DAC();
+	POP_WAIT(600u);        /* P1: codec reset asserted (~ADAU_RESET low), codec bus switches on */
+#if (POP_PROBE == 2)
+	Wait_Ms(POP_RESET_MS); /* reset held: the outputs drop as after a power-up */
+#endif
 
 	while(delay11--)
 	{
@@ -1092,6 +1184,7 @@ void Switch_Configurator()
 
 	/* Software Switch Configuration for Re-Setting ADC-DAC  */
 	ConfigSoftSwitches_ADAU_Reset();
+	POP_WAIT(700u);        /* P2: codec reset released */
 
 
 	/* wait for Codec to up */
@@ -1459,29 +1552,100 @@ static int Stop_TWI(void)
 
 /*****************************************************************************************************************************/
 
-static int ADAU_1962_init(void)
-{	int i;
-	ADAU_1962_Pllinit();
-	for(i=0;i<28;i++)
+/* Config_array_DAC rows first..last written and read back; 0 at the first one that does not hold (printed) */
+static int Dac_Rows(int first, int last)
+{
+	int i;
+	for (i = first; i <= last; i++)
 	{
-		/* write value */
-		Write_TWI_8bit_Reg(Config_array_DAC[i].Reg_Add,Config_array_DAC[i].Value);
-		Config_read_DAC[i]=Read_TWI_8bit_Reg(Config_array_DAC[i].Reg_Add);
-		if(Config_array_DAC[i].Value!= Config_read_DAC[i])
+		Write_TWI_8bit_Reg(Config_array_DAC[i].Reg_Add, Config_array_DAC[i].Value);
+		Config_read_DAC[i] = Read_TWI_8bit_Reg(Config_array_DAC[i].Reg_Add);
+		if (Config_array_DAC[i].Value != Config_read_DAC[i])
 		{
 			printf("  [ERROR] ADAU_1962 failed at idx %d (reg 0x%02X): wrote 0x%02X, read back 0x%02X\n",
 				   i, Config_array_DAC[i].Reg_Add, (unsigned char)Config_array_DAC[i].Value, (unsigned char)Config_read_DAC[i]);
 			fflush(stdout);
-			return FAILED;
+			return 0;
 		}
 	}
-	printf("  [OK] ADAU_1962 configured successfully (all 28 registers verified)\n");
+	return 1;
+}
+
+/* DAC1-12 powered down (off 1) or up (off 0) in PDN_CTRL_2/3; 1 when both read back as written, else printed with tag */
+static int Dac_Channels(int off, const char *tag)
+{
+	const unsigned char v2 = off ? 0xffu : 0x00u;
+	const unsigned char v3 = off ? 0x0fu : 0x00u;
+	unsigned char r2, r3;
+	Write_TWI_8bit_Reg(ADAU1962_PDN_CTRL_2, v2);
+	Write_TWI_8bit_Reg(ADAU1962_PDN_CTRL_3, v3);
+	r2 = Read_TWI_8bit_Reg(ADAU1962_PDN_CTRL_2);
+	r3 = Read_TWI_8bit_Reg(ADAU1962_PDN_CTRL_3);
+	if ((r2 != v2) || (r3 != v3))
+	{
+		printf("  [%s] ADAU_1962 DAC1-12 power-%s: PDN_CTRL_2/3 wrote 0x%02X/0x%02X, read back 0x%02X/0x%02X\n",
+			   tag, off ? "down" : "up", v2, v3, r2, r3);
+		fflush(stdout);
+		return 0;
+	}
+	return 1;
+}
+
+/* PLL and PUP (ADAU_1962_Pllinit), then the table muted, DAC1-12 powered as DAC_POWER_ORDER says (orders 2 and 3: on
+ * settleMs after the set-up), the unmute last */
+static int ADAU_1962_init(int order, uint32_t settleMs)
+{
+	char note[48] = "";
+	ADAU_1962_Pllinit(order);
+	if (!Dac_Rows(0, 0))
+	{
+		return FAILED;
+	}
+	POP_WAIT(1200u);       /* P7: PDN_THRMSENS_CTRL_1 (its reset value) */
+	if (order == 0)
+	{
+		if (!Dac_Channels(1, "ERROR"))
+		{
+			return FAILED;
+		}
+		POP_WAIT(1300u);   /* P8: DAC1-12 down */
+	}
+	if (!Dac_Rows(1, 1))
+	{
+		return FAILED;
+	}
+	POP_WAIT(1500u);       /* P10: MMUTE */
+	if (!Dac_Rows(2, DAC_ROWS - 2))
+	{
+		return FAILED;
+	}
+	POP_WAIT(1600u);       /* P11: serial port, volumes, DAC power modes */
+	if (order != 1)
+	{
+		if (order >= 2)
+		{
+			Wait_Ms(settleMs);
+			snprintf(note, sizeof(note), ", DAC1-12 on %u ms after the set-up", (unsigned)settleMs);
+		}
+		if (!Dac_Channels(0, "ERROR"))
+		{
+			return FAILED;
+		}
+		POP_WAIT(1700u);   /* P12: DAC1-12 up */
+	}
+	if (!Dac_Rows(DAC_ROWS - 1, DAC_ROWS - 1))
+	{
+		return FAILED;
+	}
+	POP_WAIT(1900u);       /* P14: unmute, TDM4 192 kHz */
+	printf("  [OK] ADAU_1962 configured successfully (%d table rows verified, DAC power order %d%s)\n", DAC_ROWS, order,
+		   note);
 	fflush(stdout);
 
 	return SUCCESS;
 }
 
-static int ADAU_1962_Pllinit(void)
+static int ADAU_1962_Pllinit(int order)
 {
 	int status,delay1=0xffff;
 	int timeout = 500000;
@@ -1494,13 +1658,29 @@ static int ADAU_1962_Pllinit(void)
 		REPORT_ERROR("TWI Set Hw address failed 0x%08X\n", eResult);
 	}
 
+	if (order == 2)
+	{
+		/* The data sheet wants PUP as the first write: the read-back shows whether these hold before it */
+		if (Dac_Channels(1, "POP"))
+		{
+			printf("  [POP] DAC1-12 powered down before PUP (read back as written)\n");
+			fflush(stdout);
+		}
+		POP_WAIT(1300u);   /* P8: DAC1-12 down */
+	}
 	Write_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL0,0x01);
+	if (order == 3)
+	{
+		(void)Dac_Channels(1, "POP");
+	}
+	POP_WAIT(800u);        /* P3: PUP = 1, master power-up (order 3: DAC1-12 down right after it) */
 	while(delay1--)
 	{
 		asm("nop;");
 	}
 
 	Write_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL0,0x05);
+	POP_WAIT(900u);        /* P4: MCS = 512 x fS */
 
 	delay1=0xffff;
 	while(delay1--)
@@ -1509,6 +1689,7 @@ static int ADAU_1962_Pllinit(void)
 	}
 
 	Write_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL1,0x2A); /* Bit 3=1: Enable DAC Automute on PLL Unlock; Bit 1=1: VREF ON */
+	POP_WAIT(1000u);       /* P5: VREF_EN, PLL automute (the reset value) */
 	delay1=0xffff;
 	while(delay1--)
 	{
@@ -1519,6 +1700,7 @@ static int ADAU_1962_Pllinit(void)
 	{
 		status=Read_TWI_8bit_Reg(ADAU1962_PLL_CTL_CTRL1);
 	}
+	POP_WAIT(1100u);       /* P6: PLL locked */
 
 	if (timeout == 0) {
 		printf("  [WARN] ADAU_1962 PLL lock TIMEOUT! status=0x%02X\n", status);
@@ -1610,6 +1792,7 @@ int main(int argc, char *argv[])
 
 	/* Before anything else: a reload after a core-only reset finds the previous program's SPORT4 and DMAs running */
 	leftover = Stop_Leftover_Sport();
+	POP_WAIT(2000u);       /* P0: main() has started; steps before this are not the codec set-up */
 
 	adi_initComponents();
 #if defined(__ADSPARM__)
@@ -1645,6 +1828,10 @@ int main(int argc, char *argv[])
 		fflush(stdout);
 	}
 
+#if (POP_PROBE == 2)
+	Pop_Order();
+#endif
+
     /* Switch Configuration */
 	Switch_Configurator();
 	printf("[Step 2] Switch_Configurator Done\n");
@@ -1668,7 +1855,7 @@ int main(int argc, char *argv[])
 	{
 		printf("[Step 5] Configuring ADAU1962 DAC...\n");
 		fflush(stdout);
-		Result=ADAU_1962_init();
+		Result=ADAU_1962_init(DAC_ORDER, DAC_SETTLE);
 	}
 
 	/* ADAU1979 Initialization */
